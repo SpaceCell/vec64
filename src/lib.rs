@@ -7,6 +7,32 @@
 //! This alignment is useful for optimal performance with SIMD instruction extensions like AVX-512, and helps avoid split loads/stores across cache lines.
 //!
 //! Benefits will vary based on one's target architecture.
+//!
+//! ## WASM Compatibility
+//!
+//! Enable the `wasm` feature for Web Worker-based parallelism:
+//!
+//! ```toml
+//! vec64 = { version = "0.3", features = ["wasm"] }
+//! ```
+//!
+//! Build with `wasm-pack` using the web target:
+//!
+//! ```bash
+//! RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals' \
+//!   wasm-pack build --target web -- -Z build-std=panic_abort,std
+//! ```
+//!
+//! Initialise the thread pool from JavaScript before using parallel methods:
+//!
+//! ```javascript
+//! import init, { initThreadPool } from './pkg/index.js';
+//! await init();
+//! await initThreadPool(navigator.hardwareConcurrency);
+//! ```
+//!
+//! Note: The browser requires SharedArrayBuffer support, which needs cross-origin
+//! isolation headers (COOP and COEP).
 
 #![feature(allocator_api)]
 #![feature(slice_ptr_get)]
@@ -16,3 +42,6 @@ pub mod vec64;
 
 pub use vec64::Vec64;
 pub use alloc64::Alloc64;
+
+#[cfg(feature = "wasm")]
+pub use wasm_bindgen_rayon::init_thread_pool;

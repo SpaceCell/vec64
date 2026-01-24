@@ -77,6 +77,9 @@ Vec64 may not provide significant benefits for:
 Consider the `Minarrow` crate if you want automatic padding, and other typed but high-performant
 foundational data structures, with a focus on high-performance data and systems programming.
 
+## WASM 
+Includes WASM support via Web Workers via the *wasm* feature-flag.
+
 ## Examples
 
 See the `examples/` directory for benchmarks:

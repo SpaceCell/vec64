@@ -13,7 +13,7 @@ use std::ops::{Deref, DerefMut};
 use std::slice::{Iter, IterMut};
 use std::vec::Vec;
 
-#[cfg(feature = "parallel_proc")]
+#[cfg(any(feature = "parallel_proc", feature = "wasm"))]
 use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator};
 
 use crate::alloc64::Alloc64;
@@ -132,8 +132,8 @@ impl<T> Vec64<T> {
     ///
     /// let mut vec = Vec64::from(vec![1, 2, 3, 4, 5]);
     /// let vec2 = vec.split_off(2);
-    /// assert_eq!(vec, [1, 2]);
-    /// assert_eq!(vec2, [3, 4, 5]);
+    /// assert_eq!(&vec[..], &[1, 2]);
+    /// assert_eq!(&vec2[..], &[3, 4, 5]);
     /// ```
     #[inline]
     pub fn split_off(&mut self, at: usize) -> Self {
@@ -142,7 +142,7 @@ impl<T> Vec64<T> {
 }
 
 // Only require Send+Sync for parallel iterator methods
-#[cfg(feature = "parallel_proc")]
+#[cfg(any(feature = "parallel_proc", feature = "wasm"))]
 impl<T: Sync + Send> Vec64<T> {
     #[inline]
     pub fn par_iter(&self) -> rayon::slice::Iter<'_, T> {
@@ -371,7 +371,9 @@ macro_rules! vec64 {
         let mut _idx = 0usize;
         $(
             if $x {
-                $crate::null_masking::set_bit(&mut v.0, _idx);
+                let byte_idx = _idx / 8;
+                let bit_idx = _idx % 8;
+                v.0[byte_idx] |= 1u8 << bit_idx;
             }
             _idx += 1;
         )+
@@ -611,7 +613,7 @@ mod tests {
 }
 
 #[cfg(test)]
-#[cfg(feature = "parallel_proc")]
+#[cfg(any(feature = "parallel_proc", feature = "wasm"))]
 mod parallel_tests {
     use rayon::iter::ParallelIterator;
 
