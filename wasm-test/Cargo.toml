@@ -1,0 +1,13 @@
+[package]
+name = "wasm-test"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vec64 = { path = "..", features = ["wasm"] }
+wasm-bindgen = "0.2"
+rayon = "1.10"

@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Vec64 WASM Test</title>
+  <style>
+    body { font-family: monospace; padding: 2em; }
+    .pass { color: green; font-weight: bold; }
+    .fail { color: red; font-weight: bold; }
+    #log { white-space: pre; margin-top: 1em; }
+  </style>
+</head>
+<body>
+  <h1>Vec64 WASM Test</h1>
+  <div id="result">Running...</div>
+  <div id="log"></div>
+
+  <script type="module">
+    const log = document.getElementById('log');
+    const result = document.getElementById('result');
+
+    function print(msg) {
+      log.textContent += msg + '\n';
+      console.log(msg);
+    }
+
+    async function runTest() {
+      try {
+        print('Loading WASM module...');
+        const wasm = await import('./pkg/wasm_test.js');
+        await wasm.default();
+
+        print('Initialising thread pool...');
+        const threads = navigator.hardwareConcurrency || 4;
+        await wasm.initThreadPool(threads);
+        print(`Thread pool initialised with ${threads} threads`);
+
+        print('Running par_sum test...');
+        const len = 10000;
+        const got = wasm.par_sum(len);
+        const expected = wasm.expected_sum(len);
+
+        print(`par_sum(${len}) = ${got}`);
+        print(`expected = ${expected}`);
+
+        if (got === expected) {
+          result.textContent = 'PASS';
+          result.className = 'pass';
+          print('\nAll tests passed.');
+        } else {
+          result.textContent = 'FAIL';
+          result.className = 'fail';
+          print(`\nMismatch: got ${got}, expected ${expected}`);
+        }
+      } catch (e) {
+        result.textContent = 'FAIL';
+        result.className = 'fail';
+        print(`\nError: ${e.message}`);
+        console.error(e);
+      }
+    }
+
+    runTest();
+  </script>
+</body>
+</html>

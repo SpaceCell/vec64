@@ -16,23 +16,33 @@
 //! vec64 = { version = "0.3", features = ["wasm"] }
 //! ```
 //!
-//! Build with `wasm-pack` using the web target:
+//! Required build configuration (`.cargo/config.toml`):
+//!
+//! ```toml
+//! [target.wasm32-unknown-unknown]
+//! rustflags = ["-C", "target-feature=+atomics,+bulk-memory"]
+//!
+//! [unstable]
+//! build-std = ["panic_abort", "std"]
+//! ```
+//!
+//! Build with `wasm-pack`:
 //!
 //! ```bash
-//! RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals' \
-//!   wasm-pack build --target web -- -Z build-std=panic_abort,std
+//! wasm-pack build --target web
 //! ```
 //!
 //! Initialise the thread pool from JavaScript before using parallel methods:
 //!
 //! ```javascript
-//! import init, { initThreadPool } from './pkg/index.js';
+//! import init, { initThreadPool } from './pkg/your_crate.js';
 //! await init();
 //! await initThreadPool(navigator.hardwareConcurrency);
 //! ```
 //!
-//! Note: The browser requires SharedArrayBuffer support, which needs cross-origin
-//! isolation headers (COOP and COEP).
+//! Note: Requires nightly Rust with `rust-src` component for `build-std`. The browser
+//! needs SharedArrayBuffer support (cross-origin isolation via COOP/COEP headers).
+//! See `wasm-test/` for a complete working example.
 
 #![feature(allocator_api)]
 #![feature(slice_ptr_get)]
