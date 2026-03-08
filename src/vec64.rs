@@ -1,6 +1,6 @@
 //! # **Vec64** - *Special Vector with 64-Byte SIMD Alignment*
 //!
-//! 64-byte aligned vector type backed by a custom allocator (`Alloc64`).
+//! 64-byte aligned vector type backed by a custom allocator (`Vec64Alloc`).
 //!
 //! Provides the same API as `Vec`, but guarantees the starting address
 //! of the allocation is 64-byte aligned for SIMD, cache line, and
@@ -16,7 +16,7 @@ use std::vec::Vec;
 #[cfg(any(feature = "parallel_proc", feature = "wasm"))]
 use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator};
 
-use crate::alloc64::Alloc64;
+use crate::Vec64Alloc;
 
 /// # Vec64
 ///
@@ -24,7 +24,7 @@ use crate::alloc64::Alloc64;
 ///
 /// ## Purpose
 /// A drop-in replacement for `Vec` that ensures the starting pointer is aligned to a
-/// 64-byte boundary via a custom `Alloc64` allocator. This predominantly ensures
+/// 64-byte boundary via a custom `Vec64Alloc` allocator. This predominantly ensures
 /// compatibility with SIMD processing instruction extensions such as the AVX-512.
 /// These increase CPU throughput when using SIMD-friendly code like `std::simd`, or hand-rolled intrinsics.
 ///
@@ -33,7 +33,7 @@ use crate::alloc64::Alloc64;
 /// platform-dependent, and the Rust compiler may generate equally efficient code for
 /// ordinary `Vec` in some cases.
 ///
-/// ## Behaviour – Padding
+/// ## Behaviour - Padding
 /// This type does not add any padding to your data. Only the first element of the
 /// allocation is guaranteed to be aligned. If you construct a buffer that mixes headers,
 /// metadata, and then Arrow data pages, and you plan to extract or process the Arrow
@@ -46,23 +46,23 @@ use crate::alloc64::Alloc64;
 /// automatically handles such padding, and therefore this is only relevant if you leverage `Vec64` manually.
 ///
 /// ## Notes
-/// - All `Vec` APIs remain available—`Vec64` is a tuple wrapper over `Vec<T, Alloc64>`.
+/// - All `Vec` APIs remain available - `Vec64` is a tuple wrapper over `Vec<T, Vec64Alloc>`.
 /// - When passing to APIs expecting a `Vec`, use `.0` to extract the inner `Vec`.
-/// - Avoid mixing `Vec` and `Vec64` unless both use the same custom allocator (`Alloc64`).
+/// - Avoid mixing `Vec` and `Vec64` unless both use the same custom allocator (`Vec64Alloc`).
 /// - Alignment helps with contiguous, stride-friendly access; it does not improve
 ///   temporal locality or benefit random-access patterns.
 #[repr(transparent)]
-pub struct Vec64<T>(pub Vec<T, Alloc64>);
+pub struct Vec64<T>(pub Vec<T, Vec64Alloc>);
 
 impl<T> Vec64<T> {
     #[inline]
     pub fn new() -> Self {
-        Self(Vec::new_in(Alloc64))
+        Self(Vec::new_in(Vec64Alloc::default()))
     }
 
     #[inline]
     pub fn with_capacity(cap: usize) -> Self {
-        Self(Vec::with_capacity_in(cap, Alloc64))
+        Self(Vec::with_capacity_in(cap, Vec64Alloc::default()))
     }
 
     /// Useful when interpreting raw bytes that are buffered
@@ -95,14 +95,14 @@ impl<T> Vec64<T> {
         // Prevent Vec64<u8> destructor from running - we're transferring ownership to Vec64<T>
         mem::forget(buf);
 
-        let vec = unsafe { Vec::from_raw_parts_in(ptr, len, cap, Alloc64) };
+        let vec = unsafe { Vec::from_raw_parts_in(ptr, len, cap, Vec64Alloc::default()) };
         Vec64(vec)
     }
 
     /// Takes ownership of a raw allocation.
     ///
     /// # Safety:
-    /// - `ptr` must have been allocated by `Alloc64` (or compatible 64-byte aligned allocator)
+    /// - `ptr` must have been allocated by `Vec64Alloc` (or compatible 64-byte aligned allocator)
     /// - `ptr` must be valid for reads and writes for `len * size_of::<T>()` bytes
     /// - `len` must be less than or equal to `capacity`
     /// - The memory must not be aliased elsewhere
@@ -114,7 +114,7 @@ impl<T> Vec64<T> {
             "Vec64::from_raw_parts: pointer is not 64-byte aligned"
         );
 
-        let vec = unsafe { Vec::from_raw_parts_in(ptr, len, capacity, Alloc64) };
+        let vec = unsafe { Vec::from_raw_parts_in(ptr, len, capacity, Vec64Alloc::default()) };
         Self(vec)
     }
 
@@ -185,7 +185,7 @@ impl<T> Default for Vec64<T> {
 }
 
 impl<T> Deref for Vec64<T> {
-    type Target = Vec<T, Alloc64>;
+    type Target = Vec<T, Vec64Alloc>;
     #[inline]
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -232,7 +232,7 @@ impl<T: Display> Display for Vec64<T> {
 
 impl<T> IntoIterator for Vec64<T> {
     type Item = T;
-    type IntoIter = std::vec::IntoIter<T, Alloc64>;
+    type IntoIter = std::vec::IntoIter<T, Vec64Alloc>;
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
@@ -268,23 +268,23 @@ impl<T> FromIterator<T> for Vec64<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let iterator = iter.into_iter();
         let mut v = if let Some(exact) = iterator.size_hint().1 {
-            Vec::with_capacity_in(exact, Alloc64)
+            Vec::with_capacity_in(exact, Vec64Alloc::default())
         } else {
-            Vec::with_capacity_in(iterator.size_hint().0, Alloc64)
+            Vec::with_capacity_in(iterator.size_hint().0, Vec64Alloc::default())
         };
         v.extend(iterator);
         Self(v)
     }
 }
 
-impl<T> From<Vec<T, Alloc64>> for Vec64<T> {
+impl<T> From<Vec<T, Vec64Alloc>> for Vec64<T> {
     #[inline]
-    fn from(v: Vec<T, Alloc64>) -> Self {
+    fn from(v: Vec<T, Vec64Alloc>) -> Self {
         Self(v)
     }
 }
 
-impl<T> From<Vec64<T>> for Vec<T, Alloc64> {
+impl<T> From<Vec64<T>> for Vec<T, Vec64Alloc> {
     #[inline]
     fn from(v: Vec64<T>) -> Self {
         v.0
@@ -294,7 +294,7 @@ impl<T> From<Vec64<T>> for Vec<T, Alloc64> {
 impl<T> From<Vec<T>> for Vec64<T> {
     #[inline]
     fn from(v: Vec<T>) -> Self {
-        let mut vec = Vec::with_capacity_in(v.len(), Alloc64);
+        let mut vec = Vec::with_capacity_in(v.len(), Vec64Alloc::default());
         vec.extend(v);
         Self(vec)
     }
@@ -306,7 +306,7 @@ where
 {
     #[inline]
     fn from(s: &[T]) -> Self {
-        let mut v = Vec::with_capacity_in(s.len(), Alloc64);
+        let mut v = Vec::with_capacity_in(s.len(), Vec64Alloc::default());
         v.extend_from_slice(s);
         Self(v)
     }
@@ -367,7 +367,7 @@ macro_rules! vec64 {
         let mut v      = $crate::Vec64::<u8>::with_capacity(byte_len);
         v.0.resize(byte_len, 0);
 
-        // Sequentially set bits – no reallocations.
+        // Sequentially set bits - no reallocations.
         let mut _idx = 0usize;
         $(
             if $x {
@@ -610,6 +610,7 @@ mod tests {
             "ZST Vec should have 'infinite' capacity"
         );
     }
+
 }
 
 #[cfg(test)]

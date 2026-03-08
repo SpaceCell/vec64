@@ -2,7 +2,7 @@
 
 /*!
 Run with:
-    RUSTFLAGS="-C target-cpu=native" cargo run --release --example hotloop_bench_simd
+    RUSTFLAGS="-C target-cpu=native" cargo bench --bench hotloop_simd
 
 Purpose:
 This benchmark compares portable SIMD code on misaligned Vec vs aligned Vec64.
@@ -16,26 +16,16 @@ Methodology:
 - Report min/median/p95 over many iterations
 
 Expected Result:
-For simple summation, differences may be minimal on modern CPUs because:
-1. LLVM auto-vectorizes simple loops extremely well
-2. Modern CPUs have similar performance for aligned vs unaligned loads
-3. Hand-written SIMD doesn't help much for trivial operations
-
-Value:
-Vec64 is not designed for simple auto-vectorizable loops like this benchmark.
-Its value comes from:
-- Complex SIMD kernels (distribution PDFs, special functions, transforms)
-- Multi-region algorithms with branching that LLVM cannot auto-vectorize
-- Guaranteeing alignment for performance-critical hand-written SIMD
-- AVX-512 workloads where alignment benefits are more pronounced
-
-See the simd-kernels crate in a real-world codebase for examples.
+This benchmark isolates aligned vs unaligned SIMD loads on a simple
+summation kernel. On modern CPUs with hot caches, differences for this
+workload may be small. The benefit of guaranteed alignment is more
+pronounced with complex multi-pass SIMD kernels and AVX-512.
 */
 
 use std::hint::black_box;
 use std::mem::align_of;
 use std::simd::num::{SimdFloat, SimdInt};
-use std::simd::{LaneCount, Simd, SupportedLaneCount};
+use std::simd::Simd;
 use std::time::{Duration, Instant};
 
 use vec64::Vec64;
@@ -50,8 +40,6 @@ pub(crate) const ITERS: usize = 100;
 
 #[inline(always)]
 fn simd_sum_i64_aligned<const LANES: usize>(data: &[i64]) -> i64
-where
-    LaneCount<LANES>: SupportedLaneCount,
 {
     let n = data.len();
     let simd_width = LANES;
@@ -108,8 +96,6 @@ where
 
 #[inline(always)]
 fn simd_sum_i64<const LANES: usize>(data: &[i64]) -> i64
-where
-    LaneCount<LANES>: SupportedLaneCount,
 {
     let n = data.len();
     let simd_width = LANES;
@@ -168,8 +154,6 @@ where
 
 #[inline(always)]
 fn simd_sum_f64_aligned<const LANES: usize>(data: &[f64]) -> f64
-where
-    LaneCount<LANES>: SupportedLaneCount,
 {
     let n = data.len();
     let simd_width = LANES;
@@ -226,8 +210,6 @@ where
 
 #[inline(always)]
 fn simd_sum_f64<const LANES: usize>(data: &[f64]) -> f64
-where
-    LaneCount<LANES>: SupportedLaneCount,
 {
     let n = data.len();
     let simd_width = LANES;

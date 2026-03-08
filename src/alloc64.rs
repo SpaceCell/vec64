@@ -54,15 +54,35 @@ pub(crate) fn align_layout(mut layout: Layout) -> Layout {
     layout
 }
 
+/// Hint the kernel to use transparent huge pages for this region.
+///
+/// Always called regardless of size. The kernel decides whether THP
+/// is beneficial for the actual page range; the hint is cheap and
+/// primes allocations that will later grow past the 2MB boundary.
+#[cfg(all(feature = "thp", target_os = "linux"))]
+#[inline]
+fn hint_hugepage(ptr: *mut u8, size: usize) {
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+    let start = (ptr as usize) & !(page_size - 1);
+    let end = (ptr as usize + size + page_size - 1) & !(page_size - 1);
+    unsafe {
+        libc::madvise(start as *mut libc::c_void, end - start, libc::MADV_HUGEPAGE);
+    }
+}
+
+#[cfg(not(all(feature = "thp", target_os = "linux")))]
+#[inline]
+fn hint_hugepage(_ptr: *mut u8, _size: usize) {}
+
 unsafe impl Allocator for Alloc64 {
     /// Allocates memory with at least 64-byte alignment.
     #[inline]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let layout = align_layout(layout);
-        let ptr = unsafe { std::alloc::alloc(layout) }; // *mut u8
+        let ptr = unsafe { std::alloc::alloc(layout) };
         NonNull::new(ptr)
             .map(|nn| {
-                // SAFETY: slice len = layout.size()
+                hint_hugepage(nn.as_ptr(), layout.size());
                 unsafe {
                     NonNull::new_unchecked(slice_from_raw_parts_mut(nn.as_ptr(), layout.size()))
                 }
@@ -76,8 +96,11 @@ unsafe impl Allocator for Alloc64 {
         let layout = align_layout(layout);
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
         NonNull::new(ptr)
-            .map(|nn| unsafe {
-                NonNull::new_unchecked(slice_from_raw_parts_mut(nn.as_ptr(), layout.size()))
+            .map(|nn| {
+                hint_hugepage(nn.as_ptr(), layout.size());
+                unsafe {
+                    NonNull::new_unchecked(slice_from_raw_parts_mut(nn.as_ptr(), layout.size()))
+                }
             })
             .ok_or(AllocError)
     }
@@ -99,8 +122,11 @@ unsafe impl Allocator for Alloc64 {
         let new = align_layout(new);
         let raw = unsafe { std::alloc::realloc(ptr.as_ptr(), align_layout(old), new.size()) };
         NonNull::new(raw)
-            .map(|nn| unsafe {
-                NonNull::new_unchecked(slice_from_raw_parts_mut(nn.as_ptr(), new.size()))
+            .map(|nn| {
+                hint_hugepage(nn.as_ptr(), new.size());
+                unsafe {
+                    NonNull::new_unchecked(slice_from_raw_parts_mut(nn.as_ptr(), new.size()))
+                }
             })
             .ok_or(AllocError)
     }

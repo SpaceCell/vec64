@@ -1,9 +1,9 @@
 //! Integration test that installs `Alloc64Global` as the process-wide
 //! allocator and verifies standard `Vec` allocations are 64-byte aligned.
-#![feature(allocator_api)]
 
 #[cfg(feature = "global")]
 mod global_allocator {
+    #![feature(allocator_api)]
     use vec64::Alloc64Global;
 
     #[global_allocator]

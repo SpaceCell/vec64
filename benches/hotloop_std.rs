@@ -1,6 +1,6 @@
 //! ---------------------------------------------------------
 //! Run with:
-//!     RUSTFLAGS="-C target-cpu=native" cargo run --example hotloop_bench_std --release
+//!     RUSTFLAGS="-C target-cpu=native" cargo bench --bench hotloop_std
 //!
 //! Purpose:
 //! Measure a simple summation loop over `Vec` (forced misalignment) vs `Vec64` (64-byte aligned)

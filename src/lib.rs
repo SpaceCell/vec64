@@ -50,12 +50,28 @@
 pub mod alloc64;
 #[cfg(feature = "global")]
 pub mod global;
+#[cfg(all(feature = "mmap", target_os = "linux"))]
+pub mod mmap_alloc;
 pub mod vec64;
 
 pub use vec64::Vec64;
 pub use alloc64::Alloc64;
+#[cfg(all(feature = "mmap", target_os = "linux"))]
+pub use mmap_alloc::MAllocPg64;
 #[cfg(feature = "global")]
 pub use global::Alloc64Global;
+
+// The mmap feature requires Linux syscalls (mmap, mremap, madvise).
+#[cfg(all(feature = "mmap", not(target_os = "linux")))]
+compile_error!("The `mmap` feature requires Linux (mmap, mremap, madvise)");
+
+/// Allocator type backing Vec64, determined by feature flags.
+#[cfg(all(feature = "mmap", target_os = "linux"))]
+pub type Vec64Alloc = mmap_alloc::MAllocPg64;
+
+/// Allocator type backing Vec64, determined by feature flags.
+#[cfg(not(feature = "mmap"))]
+pub type Vec64Alloc = alloc64::Alloc64;
 
 #[cfg(feature = "wasm")]
 pub use wasm_bindgen_rayon::init_thread_pool;
