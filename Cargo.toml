@@ -17,3 +17,6 @@ parallel_proc = ["rayon"]
 
 # WASM support with Web Worker threading
 wasm = ["wasm-bindgen", "wasm-bindgen-rayon", "rayon"]
+
+# Provides Alloc64Global for use as #[global_allocator]
+global = []

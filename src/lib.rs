@@ -48,10 +48,14 @@
 #![feature(slice_ptr_get)]
 
 pub mod alloc64;
+#[cfg(feature = "global")]
+pub mod global;
 pub mod vec64;
 
 pub use vec64::Vec64;
 pub use alloc64::Alloc64;
+#[cfg(feature = "global")]
+pub use global::Alloc64Global;
 
 #[cfg(feature = "wasm")]
 pub use wasm_bindgen_rayon::init_thread_pool;

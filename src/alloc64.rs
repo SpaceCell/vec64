@@ -46,7 +46,7 @@ pub struct Alloc64;
 
 /// Ensures the layout alignment is at least 64 bytes.
 #[inline]
-fn align_layout(mut layout: Layout) -> Layout {
+pub(crate) fn align_layout(mut layout: Layout) -> Layout {
     // Never reduce alignment; only bump to ≥64.
     if layout.align() < ALIGN_64 {
         layout = Layout::from_size_align(layout.size(), ALIGN_64).expect("Invalid 64-bit layout");
