@@ -6,12 +6,17 @@
 //!
 //! ## Allocation strategy
 //!
-//! All allocations are rounded up to 2MB huge page boundaries,
-//! ensuring both page alignment and 64-byte SIMD alignment.
+//! Allocations below 2MB use the system heap allocator with 64-byte
+//! alignment, identical to Alloc64. This avoids mmap/munmap syscall
+//! overhead for small buffers.
+//!
+//! Allocations at or above 2MB use mmap with huge page rounding.
 //! Growth uses `mremap(MREMAP_MAYMOVE)` for zero-copy virtual
 //! address remapping - the kernel adjusts page tables without
 //! copying physical memory.
 //!
+//! When a heap allocation grows past 2MB, it transitions to mmap
+//! automatically. The reverse transition occurs on shrink.
 //!
 //! With the `giant_pages` feature, initial allocations >= 1GB
 //! use `MAP_HUGETLB | MAP_HUGE_1GB` for 1GB huge pages. Gigantic
@@ -20,9 +25,9 @@
 //!
 //! ## Trade-offs
 //!
-//! Every allocation consumes at least 2MB of virtual address space.
-//! This is by design for columnar and SIMD workloads with large
-//! buffers. Not suitable for many small independent allocations.
+//! Small buffers get fast heap allocation. Large buffers get
+//! mmap with zero-copy mremap growth. The 2MB threshold is
+//! chosen to match the huge page boundary.
 //!
 //! ## Platform
 //!
@@ -31,6 +36,8 @@ use core::alloc::{AllocError, Allocator, Layout};
 use core::ptr::NonNull;
 use std::ptr::slice_from_raw_parts_mut;
 
+use crate::alloc64::align_layout;
+
 const HUGE_PAGE: usize = 2 * 1024 * 1024;
 
 #[cfg(feature = "giant_pages")]
@@ -38,16 +45,24 @@ const GIGANTIC_PAGE: usize = 1024 * 1024 * 1024;
 
 /// # MAllocPg64
 ///
-/// Zero-sized, mmap-based allocator with inherent 64-byte alignment.
+/// Zero-sized, hybrid allocator with inherent 64-byte alignment.
 ///
-/// Uses anonymous mmap for all allocations, rounded to 2MB huge page
-/// boundaries. Growth uses mremap for zero-copy virtual address
-/// remapping. Transparent huge pages are hinted via madvise.
+/// Small allocations (< 2MB) use the system heap with 64-byte
+/// alignment. Large allocations (>= 2MB) use anonymous mmap
+/// rounded to 2MB huge page boundaries. Growth across the 2MB
+/// boundary transitions between heap and mmap automatically.
 ///
 /// mmap returns page-aligned memory, so 64-byte alignment is
-/// inherently satisfied without explicit alignment enforcement.
+/// inherently satisfied. Heap allocations enforce 64-byte
+/// alignment via layout adjustment.
 #[derive(Copy, Clone, Default, Debug)]
 pub struct MAllocPg64;
+
+/// Whether this allocation size should use mmap rather than the heap.
+#[inline]
+fn uses_mmap(size: usize) -> bool {
+    size >= HUGE_PAGE
+}
 
 /// Round `size` up to the appropriate page boundary.
 ///
@@ -127,10 +142,66 @@ unsafe fn fat_ptr(ptr: NonNull<u8>, mapped: usize) -> NonNull<[u8]> {
     unsafe { NonNull::new_unchecked(slice_from_raw_parts_mut(ptr.as_ptr(), mapped)) }
 }
 
+// ---------------------------------------------------------------------------
+// Heap allocation with 64-byte alignment, for small buffers
+// ---------------------------------------------------------------------------
+
+#[inline]
+fn heap_alloc(layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+    let layout = align_layout(layout);
+    let ptr = unsafe { std::alloc::alloc(layout) };
+    NonNull::new(ptr)
+        .map(|nn| unsafe { fat_ptr(nn, layout.size()) })
+        .ok_or(AllocError)
+}
+
+#[inline]
+fn heap_alloc_zeroed(layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+    let layout = align_layout(layout);
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+    NonNull::new(ptr)
+        .map(|nn| unsafe { fat_ptr(nn, layout.size()) })
+        .ok_or(AllocError)
+}
+
+#[inline]
+unsafe fn heap_dealloc(ptr: NonNull<u8>, layout: Layout) {
+    unsafe { std::alloc::dealloc(ptr.as_ptr(), align_layout(layout)) };
+}
+
+#[inline]
+unsafe fn heap_grow(
+    ptr: NonNull<u8>,
+    old: Layout,
+    new: Layout,
+) -> Result<NonNull<[u8]>, AllocError> {
+    let new_layout = align_layout(new);
+    let raw = unsafe { std::alloc::realloc(ptr.as_ptr(), align_layout(old), new_layout.size()) };
+    NonNull::new(raw)
+        .map(|nn| unsafe { fat_ptr(nn, new_layout.size()) })
+        .ok_or(AllocError)
+}
+
+#[inline]
+unsafe fn heap_shrink(
+    ptr: NonNull<u8>,
+    old: Layout,
+    new: Layout,
+) -> Result<NonNull<[u8]>, AllocError> {
+    let new_layout = align_layout(new);
+    let raw = unsafe { std::alloc::realloc(ptr.as_ptr(), align_layout(old), new_layout.size()) };
+    NonNull::new(raw)
+        .map(|nn| unsafe { fat_ptr(nn, new_layout.size()) })
+        .ok_or(AllocError)
+}
+
 unsafe impl Allocator for MAllocPg64 {
     #[inline]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let size = layout.size();
+        if !uses_mmap(size) {
+            return heap_alloc(layout);
+        }
         let mapped = mapped_size(size);
         let ptr = do_mmap(size, mapped)?;
         hint_thp(ptr, size, mapped);
@@ -138,23 +209,34 @@ unsafe impl Allocator for MAllocPg64 {
     }
 
     /// mmap anonymous pages are zero-filled by the kernel.
+    /// Heap path uses alloc_zeroed.
     #[inline]
     fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let size = layout.size();
+        if !uses_mmap(size) {
+            return heap_alloc_zeroed(layout);
+        }
         self.allocate(layout)
     }
 
     #[inline]
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        let mapped = mapped_size(layout.size());
+        let size = layout.size();
+        if !uses_mmap(size) {
+            return unsafe { heap_dealloc(ptr, layout) };
+        }
+        let mapped = mapped_size(size);
         unsafe {
             libc::munmap(ptr.as_ptr() as *mut libc::c_void, mapped);
         }
     }
 
-    /// Grows the mapping using mremap for zero-copy virtual address remapping.
+    /// Grows the allocation. Handles four cases:
     ///
-    /// If the new size fits within the current mapped region, returns
-    /// the existing pointer without a syscall.
+    /// - Heap to heap: realloc
+    /// - Mmap to mmap: mremap for zero-copy growth
+    /// - Heap to mmap: allocate mmap, copy, free heap
+    /// - Mmap to heap: cannot happen during growth since new > old
     #[inline]
     unsafe fn grow(
         &self,
@@ -162,6 +244,27 @@ unsafe impl Allocator for MAllocPg64 {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
+        let old_mmap = uses_mmap(old.size());
+        let new_mmap = uses_mmap(new.size());
+
+        // Heap to heap
+        if !old_mmap && !new_mmap {
+            return unsafe { heap_grow(ptr, old, new) };
+        }
+
+        // Heap to mmap - transition: allocate mmap, copy old data, free heap
+        if !old_mmap && new_mmap {
+            let new_mapped = mapped_size(new.size());
+            let new_ptr = do_mmap(new.size(), new_mapped)?;
+            unsafe {
+                core::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_ptr(), old.size());
+                heap_dealloc(ptr, old);
+            }
+            hint_thp(new_ptr, new.size(), new_mapped);
+            return Ok(unsafe { fat_ptr(new_ptr, new_mapped) });
+        }
+
+        // Mmap to mmap - use mremap
         let old_mapped = mapped_size(old.size());
         let new_mapped = mapped_size(new.size());
 
@@ -188,6 +291,7 @@ unsafe impl Allocator for MAllocPg64 {
     }
 
     /// mremap extends with anonymous pages which are zero-filled by the kernel.
+    /// Heap path uses grow then zeroes the new region.
     #[inline]
     unsafe fn grow_zeroed(
         &self,
@@ -195,13 +299,29 @@ unsafe impl Allocator for MAllocPg64 {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
+        let old_mmap = uses_mmap(old.size());
+        let new_mmap = uses_mmap(new.size());
+
+        // Heap to heap: allocate zeroed, copy old, free old
+        if !old_mmap && !new_mmap {
+            let new_block = heap_alloc_zeroed(new)?;
+            unsafe {
+                core::ptr::copy_nonoverlapping(ptr.as_ptr(), new_block.as_mut_ptr(), old.size());
+                heap_dealloc(ptr, old);
+            }
+            return Ok(new_block);
+        }
+
+        // Any path involving mmap: mmap pages are zero-filled by kernel
         unsafe { self.grow(ptr, old, new) }
     }
 
-    /// Shrinks the mapping by releasing tail pages via munmap.
+    /// Shrinks the allocation. Handles four cases:
     ///
-    /// If the new size still fits within the same mapped region,
-    /// returns the existing pointer without a syscall.
+    /// - Heap to heap: realloc
+    /// - Mmap to mmap: release tail pages via munmap
+    /// - Mmap to heap: allocate heap, copy, munmap old
+    /// - Heap to mmap: cannot happen during shrink since new < old
     #[inline]
     unsafe fn shrink(
         &self,
@@ -209,6 +329,26 @@ unsafe impl Allocator for MAllocPg64 {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
+        let old_mmap = uses_mmap(old.size());
+        let new_mmap = uses_mmap(new.size());
+
+        // Heap to heap
+        if !old_mmap && !new_mmap {
+            return unsafe { heap_shrink(ptr, old, new) };
+        }
+
+        // Mmap to heap - transition: allocate heap, copy, munmap old
+        if old_mmap && !new_mmap {
+            let new_block = heap_alloc(new)?;
+            unsafe {
+                core::ptr::copy_nonoverlapping(ptr.as_ptr(), new_block.as_mut_ptr(), new.size());
+                let old_mapped = mapped_size(old.size());
+                libc::munmap(ptr.as_ptr() as *mut libc::c_void, old_mapped);
+            }
+            return Ok(new_block);
+        }
+
+        // Mmap to mmap
         let old_mapped = mapped_size(old.size());
         let new_mapped = mapped_size(new.size());
 
@@ -269,29 +409,44 @@ mod tests {
     }
 
     #[test]
-    fn test_allocate_returns_mapped_size() {
+    fn test_small_alloc_uses_heap() {
         let a = MAllocPg64;
+        // Small allocation should not get rounded to 2MB
         let layout = Layout::from_size_align(100, 1).unwrap();
         let ptr = a.allocate(layout).expect("allocate failed");
-        // Returned slice length should be at least HUGE_PAGE
-        assert!(ptr.len() >= HUGE_PAGE);
+        // Heap allocations return layout.size, not HUGE_PAGE
+        assert!(ptr.len() < HUGE_PAGE, "Small alloc should use heap, not mmap");
+        let addr = ptr.as_non_null_ptr().as_ptr() as usize;
+        assert_eq!(addr % 64, 0);
+        unsafe { a.deallocate(ptr.as_non_null_ptr(), layout) };
+    }
+
+    #[test]
+    fn test_large_alloc_uses_mmap() {
+        let a = MAllocPg64;
+        let layout = Layout::from_size_align(HUGE_PAGE + 1, 1).unwrap();
+        let ptr = a.allocate(layout).expect("allocate failed");
+        // Mmap allocations return mapped_size
+        assert!(ptr.len() >= HUGE_PAGE * 2);
         unsafe { a.deallocate(ptr.as_non_null_ptr(), layout) };
     }
 
     #[test]
     fn test_allocate_zeroed() {
         let a = MAllocPg64;
-        let layout = Layout::from_size_align(4096, 1).unwrap();
-        let ptr = a.allocate_zeroed(layout).expect("allocate_zeroed failed");
-        let data = unsafe {
-            std::slice::from_raw_parts(ptr.as_non_null_ptr().as_ptr(), 4096)
-        };
-        assert!(data.iter().all(|&b| b == 0));
-        unsafe { a.deallocate(ptr.as_non_null_ptr(), layout) };
+        for size in [4096, HUGE_PAGE + 1] {
+            let layout = Layout::from_size_align(size, 1).unwrap();
+            let ptr = a.allocate_zeroed(layout).expect("allocate_zeroed failed");
+            let data = unsafe {
+                std::slice::from_raw_parts(ptr.as_non_null_ptr().as_ptr(), size)
+            };
+            assert!(data.iter().all(|&b| b == 0));
+            unsafe { a.deallocate(ptr.as_non_null_ptr(), layout) };
+        }
     }
 
     #[test]
-    fn test_grow_preserves_data() {
+    fn test_grow_heap_to_heap() {
         let a = MAllocPg64;
         let small = Layout::from_size_align(1024, 1).unwrap();
         let ptr = a.allocate(small).expect("allocate failed");
@@ -304,15 +459,77 @@ mod tests {
             *byte = (i % 256) as u8;
         }
 
-        // Grow beyond one huge page to force mremap
+        // Grow within heap range
+        let medium = Layout::from_size_align(64 * 1024, 1).unwrap();
+        let grown = unsafe {
+            a.grow(ptr.as_non_null_ptr(), small, medium).expect("grow failed")
+        };
+
+        let addr = grown.as_non_null_ptr().as_ptr() as usize;
+        assert_eq!(addr % 64, 0);
+
+        let check = unsafe {
+            std::slice::from_raw_parts(grown.as_non_null_ptr().as_ptr(), 1024)
+        };
+        for (i, &byte) in check.iter().enumerate() {
+            assert_eq!(byte, (i % 256) as u8, "Data corrupted at offset {}", i);
+        }
+
+        unsafe { a.deallocate(grown.as_non_null_ptr(), medium) };
+    }
+
+    #[test]
+    fn test_grow_heap_to_mmap() {
+        let a = MAllocPg64;
+        let small = Layout::from_size_align(1024, 1).unwrap();
+        let ptr = a.allocate(small).expect("allocate failed");
+
+        // Write a pattern
+        let data = unsafe {
+            std::slice::from_raw_parts_mut(ptr.as_non_null_ptr().as_ptr(), 1024)
+        };
+        for (i, byte) in data.iter_mut().enumerate() {
+            *byte = (i % 256) as u8;
+        }
+
+        // Grow past threshold into mmap territory
         let big = Layout::from_size_align(HUGE_PAGE + 4096, 1).unwrap();
         let grown = unsafe {
             a.grow(ptr.as_non_null_ptr(), small, big).expect("grow failed")
         };
 
-        // Verify data preserved
         let addr = grown.as_non_null_ptr().as_ptr() as usize;
-        assert_eq!(addr % 64, 0, "Grown pointer not 64-byte aligned");
+        assert_eq!(addr % 64, 0);
+
+        let check = unsafe {
+            std::slice::from_raw_parts(grown.as_non_null_ptr().as_ptr(), 1024)
+        };
+        for (i, &byte) in check.iter().enumerate() {
+            assert_eq!(byte, (i % 256) as u8, "Data corrupted at offset {}", i);
+        }
+
+        unsafe { a.deallocate(grown.as_non_null_ptr(), big) };
+    }
+
+    #[test]
+    fn test_grow_mmap_to_mmap() {
+        let a = MAllocPg64;
+        let medium = Layout::from_size_align(HUGE_PAGE, 1).unwrap();
+        let ptr = a.allocate(medium).expect("allocate failed");
+
+        let data = unsafe {
+            std::slice::from_raw_parts_mut(ptr.as_non_null_ptr().as_ptr(), 1024)
+        };
+        for (i, byte) in data.iter_mut().enumerate() {
+            *byte = (i % 256) as u8;
+        }
+
+        // Grow across huge page boundary to force mremap
+        let big = Layout::from_size_align(HUGE_PAGE * 3, 1).unwrap();
+        let grown = unsafe {
+            a.grow(ptr.as_non_null_ptr(), medium, big).expect("grow failed")
+        };
+
         let check = unsafe {
             std::slice::from_raw_parts(grown.as_non_null_ptr().as_ptr(), 1024)
         };
@@ -326,27 +543,26 @@ mod tests {
     #[test]
     fn test_grow_within_mapping_noop() {
         let a = MAllocPg64;
-        // Allocate 100 bytes - gets rounded to 2MB
-        let small = Layout::from_size_align(100, 1).unwrap();
-        let ptr = a.allocate(small).expect("allocate failed");
+        // Allocate in mmap territory - gets rounded to 4MB
+        let initial = Layout::from_size_align(HUGE_PAGE + 1, 1).unwrap();
+        let ptr = a.allocate(initial).expect("allocate failed");
         let original_addr = ptr.as_non_null_ptr().as_ptr() as usize;
 
-        // Grow to 1MB - still within the same 2MB mapping
-        let medium = Layout::from_size_align(1024 * 1024, 1).unwrap();
+        // Grow within the same 4MB mapping
+        let slightly_bigger = Layout::from_size_align(HUGE_PAGE * 2, 1).unwrap();
         let grown = unsafe {
-            a.grow(ptr.as_non_null_ptr(), small, medium).expect("grow failed")
+            a.grow(ptr.as_non_null_ptr(), initial, slightly_bigger).expect("grow failed")
         };
         let grown_addr = grown.as_non_null_ptr().as_ptr() as usize;
         assert_eq!(original_addr, grown_addr, "Should reuse same mapping");
 
-        unsafe { a.deallocate(grown.as_non_null_ptr(), medium) };
+        unsafe { a.deallocate(grown.as_non_null_ptr(), slightly_bigger) };
     }
 
     #[test]
-    fn test_shrink() {
+    fn test_shrink_mmap_to_heap() {
         let a = MAllocPg64;
-        // Allocate across two huge pages
-        let big = Layout::from_size_align(HUGE_PAGE * 3, 1).unwrap();
+        let big = Layout::from_size_align(HUGE_PAGE * 2, 1).unwrap();
         let ptr = a.allocate(big).expect("allocate failed");
 
         // Write pattern
@@ -357,16 +573,15 @@ mod tests {
             *byte = (i % 256) as u8;
         }
 
-        // Shrink to one huge page
-        let small = Layout::from_size_align(HUGE_PAGE, 1).unwrap();
+        // Shrink below threshold back to heap
+        let small = Layout::from_size_align(1024, 1).unwrap();
         let shrunk = unsafe {
             a.shrink(ptr.as_non_null_ptr(), big, small).expect("shrink failed")
         };
 
         let addr = shrunk.as_non_null_ptr().as_ptr() as usize;
-        assert_eq!(addr % 64, 0, "Shrunk pointer not 64-byte aligned");
+        assert_eq!(addr % 64, 0);
 
-        // Verify data preserved
         let check = unsafe {
             std::slice::from_raw_parts(shrunk.as_non_null_ptr().as_ptr(), 1024)
         };
@@ -378,18 +593,69 @@ mod tests {
     }
 
     #[test]
-    fn test_grow_zeroed_new_region_is_zero() {
+    fn test_shrink_mmap_to_mmap() {
+        let a = MAllocPg64;
+        let big = Layout::from_size_align(HUGE_PAGE * 3, 1).unwrap();
+        let ptr = a.allocate(big).expect("allocate failed");
+
+        let data = unsafe {
+            std::slice::from_raw_parts_mut(ptr.as_non_null_ptr().as_ptr(), 1024)
+        };
+        for (i, byte) in data.iter_mut().enumerate() {
+            *byte = (i % 256) as u8;
+        }
+
+        // Shrink but stay in mmap territory
+        let medium = Layout::from_size_align(HUGE_PAGE, 1).unwrap();
+        let shrunk = unsafe {
+            a.shrink(ptr.as_non_null_ptr(), big, medium).expect("shrink failed")
+        };
+
+        let addr = shrunk.as_non_null_ptr().as_ptr() as usize;
+        assert_eq!(addr % 64, 0);
+
+        let check = unsafe {
+            std::slice::from_raw_parts(shrunk.as_non_null_ptr().as_ptr(), 1024)
+        };
+        for (i, &byte) in check.iter().enumerate() {
+            assert_eq!(byte, (i % 256) as u8, "Data corrupted at offset {}", i);
+        }
+
+        unsafe { a.deallocate(shrunk.as_non_null_ptr(), medium) };
+    }
+
+    #[test]
+    fn test_grow_zeroed_heap() {
         let a = MAllocPg64;
         let small = Layout::from_size_align(1024, 1).unwrap();
         let ptr = a.allocate(small).expect("allocate failed");
 
-        // Grow beyond current mapping to force mremap
-        let big = Layout::from_size_align(HUGE_PAGE + 4096, 1).unwrap();
+        let bigger = Layout::from_size_align(4096, 1).unwrap();
+        let grown = unsafe {
+            a.grow_zeroed(ptr.as_non_null_ptr(), small, bigger).expect("grow_zeroed failed")
+        };
+
+        // New region should be zeroed
+        let check = unsafe {
+            std::slice::from_raw_parts(grown.as_non_null_ptr().as_ptr().add(1024), 4096 - 1024)
+        };
+        assert!(check.iter().all(|&b| b == 0), "New region not zeroed");
+
+        unsafe { a.deallocate(grown.as_non_null_ptr(), bigger) };
+    }
+
+    #[test]
+    fn test_grow_zeroed_mmap() {
+        let a = MAllocPg64;
+        let small = Layout::from_size_align(HUGE_PAGE, 1).unwrap();
+        let ptr = a.allocate(small).expect("allocate failed");
+
+        let big = Layout::from_size_align(HUGE_PAGE * 3, 1).unwrap();
         let grown = unsafe {
             a.grow_zeroed(ptr.as_non_null_ptr(), small, big).expect("grow_zeroed failed")
         };
 
-        // Check that the new region past the original huge page is zeroed
+        // Check that new region past original mapping is zeroed
         let new_start = HUGE_PAGE;
         let check = unsafe {
             std::slice::from_raw_parts(
