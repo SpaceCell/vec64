@@ -38,7 +38,7 @@ use std::ptr::slice_from_raw_parts_mut;
 
 use crate::alloc64::align_layout;
 
-const HUGE_PAGE: usize = 2 * 1024 * 1024;
+pub(crate) const HUGE_PAGE: usize = 2 * 1024 * 1024;
 
 #[cfg(feature = "giant_pages")]
 const GIGANTIC_PAGE: usize = 1024 * 1024 * 1024;
@@ -60,7 +60,7 @@ pub struct MAllocPg64;
 
 /// Whether this allocation size should use mmap rather than the heap.
 #[inline]
-fn uses_mmap(size: usize) -> bool {
+pub(crate) fn uses_mmap(size: usize) -> bool {
     size >= HUGE_PAGE
 }
 
@@ -70,7 +70,7 @@ fn uses_mmap(size: usize) -> bool {
 /// All other sizes round to 2MB. Zero-sized requests get one
 /// 2MB page.
 #[inline]
-fn mapped_size(size: usize) -> usize {
+pub(crate) fn mapped_size(size: usize) -> usize {
     #[cfg(feature = "giant_pages")]
     if size >= GIGANTIC_PAGE {
         return (size + GIGANTIC_PAGE - 1) & !(GIGANTIC_PAGE - 1);
@@ -81,7 +81,7 @@ fn mapped_size(size: usize) -> usize {
 
 /// Whether this allocation size qualifies for gigantic 1GB pages.
 #[inline]
-fn uses_giant_pages(_size: usize) -> bool {
+pub(crate) fn uses_giant_pages(_size: usize) -> bool {
     #[cfg(feature = "giant_pages")]
     { _size >= GIGANTIC_PAGE }
     #[cfg(not(feature = "giant_pages"))]
@@ -89,7 +89,7 @@ fn uses_giant_pages(_size: usize) -> bool {
 }
 
 /// Perform the mmap syscall with appropriate flags.
-fn do_mmap(original_size: usize, mapped: usize) -> Result<NonNull<u8>, AllocError> {
+pub(crate) fn do_mmap(original_size: usize, mapped: usize) -> Result<NonNull<u8>, AllocError> {
     #[cfg(feature = "giant_pages")]
     let flags = if original_size >= GIGANTIC_PAGE {
         libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_HUGETLB | libc::MAP_HUGE_1GB
@@ -124,7 +124,7 @@ fn do_mmap(original_size: usize, mapped: usize) -> Result<NonNull<u8>, AllocErro
 /// Hint transparent huge pages on a mapping.
 /// Skipped for gigantic page allocations which already use explicit huge pages.
 #[inline]
-fn hint_thp(ptr: NonNull<u8>, original_size: usize, mapped: usize) {
+pub(crate) fn hint_thp(ptr: NonNull<u8>, original_size: usize, mapped: usize) {
     if uses_giant_pages(original_size) {
         return;
     }
@@ -138,7 +138,7 @@ fn hint_thp(ptr: NonNull<u8>, original_size: usize, mapped: usize) {
 /// # Safety
 /// `ptr` must be non-null and valid for `mapped` bytes.
 #[inline]
-unsafe fn fat_ptr(ptr: NonNull<u8>, mapped: usize) -> NonNull<[u8]> {
+pub(crate) unsafe fn fat_ptr(ptr: NonNull<u8>, mapped: usize) -> NonNull<[u8]> {
     unsafe { NonNull::new_unchecked(slice_from_raw_parts_mut(ptr.as_ptr(), mapped)) }
 }
 

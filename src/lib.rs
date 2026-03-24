@@ -60,6 +60,8 @@ pub use alloc64::Alloc64;
 pub use mmap_alloc::MAllocPg64;
 #[cfg(feature = "global")]
 pub use global::Alloc64Global;
+#[cfg(all(feature = "global", feature = "mmap", target_os = "linux"))]
+pub use global::MAllocPg64Global;
 
 // The mmap feature requires Linux syscalls (mmap, mremap, madvise).
 #[cfg(all(feature = "mmap", not(target_os = "linux")))]
