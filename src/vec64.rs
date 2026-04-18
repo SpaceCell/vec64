@@ -338,6 +338,29 @@ impl<T> BorrowMut<[T]> for Vec64<T> {
     }
 }
 
+/// Allow `Vec64<u8>` to act as an `io::Write` sink, appending incoming bytes
+/// into the 64-byte aligned allocation. Mirrors the standard library's
+/// `impl Write for Vec<u8>` so any writer expecting `io::Write` can target
+/// an aligned buffer without an intermediate adapter.
+impl std::io::Write for Vec64<u8> {
+    #[inline]
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.0.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    #[inline]
+    fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.0.extend_from_slice(data);
+        Ok(())
+    }
+
+    #[inline]
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[macro_export]
 macro_rules! vec64 {
     // Bool: repetition form
