@@ -63,16 +63,21 @@ pub use global::Alloc64Global;
 #[cfg(all(feature = "global", feature = "mmap", target_os = "linux"))]
 pub use global::MAllocPg64Global;
 
-// The mmap feature requires Linux syscalls (mmap, mremap, madvise).
-#[cfg(all(feature = "mmap", not(target_os = "linux")))]
-compile_error!("The `mmap` feature requires Linux (mmap, mremap, madvise)");
+// The mmap-backed allocator depends on Linux-only syscalls (mmap, mremap,
+// madvise). When the `mmap` feature is enabled on a non-Linux target we
+// silently fall back to the standard `Alloc64` allocator so that downstream
+// crates can ship a single feature set portably; the mmap optimisation
+// activates only where the kernel supports it.
 
 /// Allocator type backing Vec64, determined by feature flags.
 #[cfg(all(feature = "mmap", target_os = "linux"))]
 pub type Vec64Alloc = mmap_alloc::MAllocPg64;
 
 /// Allocator type backing Vec64, determined by feature flags.
-#[cfg(not(feature = "mmap"))]
+///
+/// On non-Linux targets the `mmap` feature has no effect and the standard
+/// `Alloc64` allocator is used instead.
+#[cfg(any(not(feature = "mmap"), all(feature = "mmap", not(target_os = "linux"))))]
 pub type Vec64Alloc = alloc64::Alloc64;
 
 #[cfg(feature = "wasm")]
