@@ -231,6 +231,43 @@ impl<T> AppendOnlyVec<T> {
             idx: 0,
         }
     }
+
+    /// Returns the published prefix as a mutable contiguous slice.
+    ///
+    /// Requires `&mut self`, so the borrow checker forbids any
+    /// concurrent `&self` operation (no concurrent `push`, `as_slice`,
+    /// `get`, `iter`) for the lifetime of the returned slice. The
+    /// `reserved`/`published` atomics are not modified by this method;
+    /// only the contents of already-published slots are exposed for
+    /// mutation. After the borrow ends, future concurrent `&self`
+    /// operations observe the same atomic state as before, with the
+    /// updated slot contents.
+    ///
+    /// Pair with `Arc::get_mut` (or `Arc::make_mut`) when the vec lives
+    /// behind an `Arc`: an `&mut AppendOnlyVec` is only reachable when
+    /// the Arc has a single strong reference, so no other holder can
+    /// be reading or pushing.
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        // `published.get_mut()` is sound: we have unique access.
+        let len = *self.published.get_mut();
+        // SAFETY: slots [0, len) are fully initialised. `&mut self`
+        // ensures exclusive access; no concurrent reader or writer
+        // can observe a partially-mutated state.
+        // `UnsafeCell<MaybeUninit<T>>` has the same layout as `T`, so
+        // casting the base pointer to `*mut T` is sound.
+        unsafe { std::slice::from_raw_parts_mut(self.slots.as_ptr() as *mut T, len) }
+    }
+
+    /// Returns a mutable iterator over the published prefix.
+    ///
+    /// Same `&mut self` exclusivity guarantee as `as_mut_slice`: no
+    /// concurrent `&self` operation can run for the lifetime of the
+    /// iterator. Use to edit existing entries in place when exclusive
+    /// access is held.
+    #[inline]
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        self.as_mut_slice().iter_mut()
+    }
 }
 
 unsafe impl<T: Send> Send for AppendOnlyVec<T> {}
@@ -354,6 +391,42 @@ mod tests {
         v.push(200);
         let pairs: Vec<(usize, u32)> = v.iter().map(|(i, x)| (i, *x)).collect();
         assert_eq!(pairs, vec![(0, 100), (1, 200)]);
+    }
+
+    #[test]
+    fn iter_mut_edits_published_prefix() {
+        let mut v = AppendOnlyVec::<String>::with_capacity(4);
+        v.push("alpha".to_string());
+        v.push("beta".to_string());
+        v.push("gamma".to_string());
+
+        for s in v.iter_mut() {
+            s.make_ascii_uppercase();
+        }
+
+        assert_eq!(v.count(), 3);
+        let snap: Vec<String> = v.iter().map(|(_, s)| s.clone()).collect();
+        assert_eq!(snap, vec!["ALPHA", "BETA", "GAMMA"]);
+    }
+
+    #[test]
+    fn as_mut_slice_covers_published_only() {
+        let mut v = AppendOnlyVec::<u32>::with_capacity(8);
+        v.push(1);
+        v.push(2);
+        v.push(3);
+        let slice = v.as_mut_slice();
+        assert_eq!(slice.len(), 3);
+        for x in slice.iter_mut() {
+            *x *= 10;
+        }
+        assert_eq!(v.as_slice(), &[10, 20, 30]);
+    }
+
+    #[test]
+    fn iter_mut_empty_is_empty() {
+        let mut v = AppendOnlyVec::<u32>::with_capacity(4);
+        assert_eq!(v.iter_mut().count(), 0);
     }
 
     #[test]
