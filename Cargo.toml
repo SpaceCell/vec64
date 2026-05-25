@@ -1,6 +1,6 @@
 [package]
 name = "vec64"
-version = "0.4.4"
+version = "0.4.5"
 edition = "2024"
 description = "High-performance Rust vector type with automatic 64-byte SIMD alignment."
 license = "Apache-2.0"
@@ -30,6 +30,12 @@ mmap = ["thp"]
 
 # 1GB "gigantic" pages for MAllocPg64 allocations >= 1GB
 giant_pages = ["mmap"]
+
+# Lock-free contiguous append-only vector with stable element addresses.
+# `AppendOnlyVec<T>` exposes `as_slice() -> &[T]` for lock-free reads and
+# `push(value) -> Option<usize>` for lock-free CAS-bounded writes. Used
+# downstream as the value array backing shared categorical dictionaries.
+append_only_vec = []
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }

@@ -48,6 +48,8 @@
 #![feature(slice_ptr_get)]
 
 pub mod alloc64;
+#[cfg(feature = "append_only_vec")]
+pub mod append_only_vec;
 #[cfg(feature = "global")]
 pub mod global;
 #[cfg(all(feature = "mmap", target_os = "linux"))]
@@ -56,6 +58,8 @@ pub mod vec64;
 
 pub use vec64::Vec64;
 pub use alloc64::Alloc64;
+#[cfg(feature = "append_only_vec")]
+pub use append_only_vec::AppendOnlyVec;
 #[cfg(all(feature = "mmap", target_os = "linux"))]
 pub use mmap_alloc::MAllocPg64;
 #[cfg(feature = "global")]
