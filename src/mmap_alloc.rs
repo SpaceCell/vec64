@@ -1,44 +1,58 @@
 //! # MAllocPg64 - mmap-based 64-byte Aligned Allocator
 //!
 //! Linux-specific allocator using `mmap` for page-aligned allocations,
-//! `mremap` for zero-copy growth, and transparent huge pages via 2MB
-//! page rounding with `madvise(MADV_HUGEPAGE)`.
+//! `mremap` for zero-copy growth, and transparent huge page hints via
+//! `madvise(MADV_HUGEPAGE)`.
 //!
 //! ## Allocation strategy
 //!
-//! Allocations below 2MB use the system heap allocator with 64-byte
-//! alignment, identical to Alloc64. This avoids mmap/munmap syscall
-//! overhead for small buffers.
+//! Allocations below `HUGE_PAGE` use the system heap allocator with
+//! 64-byte alignment, identical to Alloc64.
 //!
-//! Allocations at or above 2MB use mmap with huge page rounding.
-//! Growth uses `mremap(MREMAP_MAYMOVE)` for zero-copy virtual
-//! address remapping - the kernel adjusts page tables without
-//! copying physical memory.
+//! Allocations at or above `HUGE_PAGE` use mmap with `HUGE_PAGE`
+//! rounding. Growth uses `mremap(MREMAP_MAYMOVE)` for zero-copy
+//! virtual address remapping - the kernel adjusts page tables
+//! without copying physical memory.
 //!
-//! When a heap allocation grows past 2MB, it transitions to mmap
-//! automatically. The reverse transition occurs on shrink.
+//! When a heap allocation grows past `HUGE_PAGE`, it transitions to
+//! mmap automatically. The reverse transition occurs on shrink.
 //!
-//! With the `giant_pages` feature, initial allocations >= 1GB
-//! use `MAP_HUGETLB | MAP_HUGE_1GB` for 1GB huge pages. Gigantic
-//! pages are only used for the initial allocation; growing into
-//! 1GB territory from a smaller mapping stays on 2MB THP.
+//! With the `giant_pages` feature, initial allocations >= 1GB use
+//! `MAP_HUGETLB | MAP_HUGE_1GB`. Gigantic pages are only used for
+//! the initial allocation; growing into 1GB territory from a smaller
+//! mapping stays on the `HUGE_PAGE` rounding.
 //!
-//! ## Trade-offs
+//! ## Configuring the threshold
 //!
-//! Small buffers get fast heap allocation. Large buffers get
-//! mmap with zero-copy mremap growth. The 2MB threshold is
-//! chosen to match the huge page boundary.
+//! `HUGE_PAGE` defaults to 256 KiB. Override by setting
+//! `VEC64_HUGE_PAGE_BYTES` (a power of two, `>= 4096`) in the build
+//! environment; the build script regenerates the constant.
 //!
 //! ## Platform
 //!
 //! Linux only. Requires mmap, mremap, munmap, madvise.
+//!
+//! ## Cross-process safety
+//!
+//! Allocations are `MAP_PRIVATE | MAP_ANONYMOUS`. The mapping is private to
+//! the allocating process. Any in-place mutation method that relies on this
+//! allocator's growth, shrink, or splice paths (notably `Vec64::delete_range`
+//! on Linux with this feature) is therefore safe to call only from the
+//! owning process.
+//!
+//! If a downstream crate re-exports the underlying pointer across a process
+//! boundary, for example via a shared-memory wrapper, the other process holds
+//! a separate copy-on-write view. Mutations on either side will not be
+//! visible to the other, and in-place page remapping on the owning side
+//! invalidates the remote view. Treat such buffers as immutable after
+//! sharing, or coordinate the lifecycle externally.
 use core::alloc::{AllocError, Allocator, Layout};
 use core::ptr::NonNull;
 use std::ptr::slice_from_raw_parts_mut;
 
 use crate::alloc64::align_layout;
 
-pub(crate) const HUGE_PAGE: usize = 2 * 1024 * 1024;
+include!(concat!(env!("OUT_DIR"), "/huge_page.rs"));
 
 #[cfg(feature = "giant_pages")]
 const GIGANTIC_PAGE: usize = 1024 * 1024 * 1024;
