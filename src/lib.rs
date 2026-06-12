@@ -54,8 +54,10 @@ pub mod append_only_vec;
 pub mod global;
 #[cfg(all(feature = "mmap", target_os = "linux"))]
 pub mod mmap_alloc;
+pub mod page_aligned;
 pub mod vec64;
 
+pub use page_aligned::{PageAligned, page_align_bitmask_step, page_align_t_step};
 pub use vec64::Vec64;
 pub use alloc64::Alloc64;
 #[cfg(feature = "append_only_vec")]

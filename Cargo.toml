@@ -1,9 +1,10 @@
 [package]
 name = "vec64"
-version = "0.4.6"
+version = "0.4.7"
 edition = "2024"
 description = "High-performance Rust vector type with automatic 64-byte SIMD alignment."
 license = "Apache-2.0"
+repository = "https://github.com/pbower/vec64"
 
 [dependencies]
 rayon = { version = "1.11.0", optional = true }
@@ -25,7 +26,16 @@ global = []
 # Transparent huge page hints for Alloc64 on Linux via madvise
 thp = ["dep:libc"]
 
-# Vec64 backed by MAllocPg64 using mmap/mremap, Linux-only
+# Vec64 backed by MAllocPg64 using mmap/mremap, Linux-only.
+#
+# Allocations are MAP_PRIVATE | MAP_ANONYMOUS, so the mapping is
+# private to the allocating process. In-place mutation methods that
+# rely on this allocator (e.g. Vec64::delete_range) are sound only
+# while the buffer lives within the owning process. If a downstream
+# crate re-exports the underlying pointer across a process boundary
+# (memfd, /dev/shm, custom IPC), the remote view will not see the
+# mutation and may be invalidated by page remapping. Leave the
+# feature off if your buffers cross process boundaries.
 mmap = ["thp"]
 
 # 1GB "gigantic" pages for MAllocPg64 allocations >= 1GB
@@ -40,6 +50,9 @@ giant_pages = ["mmap"]
 # mutation of existing entries under exclusive access. Used downstream
 # as the value array backing shared categorical dictionaries.
 append_only_vec = []
+
+[lib]
+bench = false
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
@@ -70,5 +83,15 @@ harness = false
 
 [[bench]]
 name = "jemalloc_concurrent"
+harness = false
+required-features = ["mmap"]
+
+[[bench]]
+name = "delete_range"
+harness = false
+required-features = ["mmap"]
+
+[[bench]]
+name = "concat"
 harness = false
 required-features = ["mmap"]

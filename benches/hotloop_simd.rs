@@ -395,7 +395,7 @@ fn create_misaligned_storage_f64(data: &[f64]) -> (Vec<f64>, usize) {
 // --------------------------- Benchmark harness ----------------------------
 
 pub fn run_benchmark(n: usize, simd_lanes: usize) {
-    println!("Running SIMD benchmarks (n = {n}, lanes = {simd_lanes})\n");
+    println!("hotloop_bench_simd: n = {n}, lanes = {simd_lanes}, iters = {ITERS}\n");
 
     // --------------------------- Prepare data ---------------------------
 
@@ -572,13 +572,8 @@ pub fn run_benchmark(n: usize, simd_lanes: usize) {
         fmt_dur(stats_vec64_f64.p95)
     );
 
-    println!("\n---------------------- END OF SIMD BENCHMARKS ---------------------------");
 }
 
 fn main() {
-    println!(
-        "SIMD sum benchmarks (n = {}, lanes = {}, iters = {})",
-        N, SIMD_LANES, ITERS
-    );
     run_benchmark(N, SIMD_LANES);
 }
