@@ -4,6 +4,7 @@ version = "0.4.7"
 edition = "2024"
 description = "High-performance Rust vector type with automatic 64-byte SIMD alignment."
 license = "Apache-2.0"
+repository = "https://github.com/pbower/vec64"
 
 [dependencies]
 rayon = { version = "1.11.0", optional = true }
@@ -49,6 +50,9 @@ giant_pages = ["mmap"]
 # mutation of existing entries under exclusive access. Used downstream
 # as the value array backing shared categorical dictionaries.
 append_only_vec = []
+
+[lib]
+bench = false
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }

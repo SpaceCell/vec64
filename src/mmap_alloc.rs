@@ -296,7 +296,17 @@ unsafe impl Allocator for MAllocPg64 {
         };
 
         if raw == libc::MAP_FAILED {
-            return Err(AllocError);
+            // mremap requires the source range to be a single mapping, and
+            // an in-place splice (`Vec64::delete_range`) or page-level append
+            // (`Vec64::extend_from_vec64`) can leave the allocation as
+            // several adjacent mappings. Relocate through a fresh mapping.
+            let new_ptr = do_mmap(new.size(), new_mapped)?;
+            unsafe {
+                core::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_ptr(), old.size());
+                libc::munmap(ptr.as_ptr() as *mut libc::c_void, old_mapped);
+            }
+            hint_thp(new_ptr, new.size(), new_mapped);
+            return Ok(unsafe { fat_ptr(new_ptr, new_mapped) });
         }
 
         let nn = NonNull::new(raw as *mut u8).ok_or(AllocError)?;

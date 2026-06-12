@@ -9,6 +9,8 @@
 //! Methodology:
 //! - Force misalignment for `Vec` by allocating extra headroom and offsetting the start element.
 //! - Compare misaligned `Vec` slice vs aligned `Vec64` on identical data and length.
+//! - Route both columns through one `#[inline(never)]` kernel per type, so every buffer is
+//!   measured by the same machine code.
 //! - Warm up the exact slices that are timed.
 //! - Alternate measurement order each iteration to reduce cache/order bias.
 //! - Use `black_box` on the final accumulator only (not on the slice) to keep the optimiser honest
@@ -80,6 +82,27 @@ fn kahan_sum(xs: &[f64]) -> f64 {
     s
 }
 
+/// Shared summation kernels. One compiled copy serves every timed buffer,
+/// so the comparison measures the memory rather than per-copy code
+/// generation.
+#[inline(never)]
+fn sum_i64(xs: &[i64]) -> i64 {
+    let mut acc = 0i64;
+    for &v in xs {
+        acc += v;
+    }
+    acc
+}
+
+#[inline(never)]
+fn sum_f64(xs: &[f64]) -> f64 {
+    let mut acc = 0.0f64;
+    for &v in xs {
+        acc += v;
+    }
+    acc
+}
+
 fn create_misaligned_storage_i64(data: &[i64]) -> (Vec<i64>, usize) {
     let n = data.len();
     let mut storage = vec![0i64; n + 1];
@@ -140,73 +163,21 @@ pub fn main() {
     println!();
 
     // ---------------------- Correctness ----------------------
-    let mut check_i64_vec = 0i64;
-    {
-        let s = &vec_i64[..];
-        for &v in s {
-            check_i64_vec += v;
-        }
-    }
-    let mut check_i64_v64 = 0i64;
-    {
-        let s = &vec64_i64[..];
-        for &v in s {
-            check_i64_v64 += v;
-        }
-    }
+    let check_i64_vec = sum_i64(vec_i64);
+    let check_i64_v64 = sum_i64(&vec64_i64[..]);
     assert_eq!(check_i64_vec, check_i64_v64, "i64 sequences differ");
 
     let exp_f64 = kahan_sum(&vec_f64[..]);
-    let mut check_f64_vec = 0.0f64;
-    {
-        let s = &vec_f64[..];
-        for &v in s {
-            check_f64_vec += v;
-        }
-    }
-    let mut check_f64_v64 = 0.0f64;
-    {
-        let s = &vec64_f64[..];
-        for &v in s {
-            check_f64_v64 += v;
-        }
-    }
+    let check_f64_vec = sum_f64(vec_f64);
+    let check_f64_v64 = sum_f64(&vec64_f64[..]);
     let eps = 1e-6 * exp_f64.abs().max(1.0);
     assert!((check_f64_vec - exp_f64).abs() <= eps && (check_f64_v64 - exp_f64).abs() <= eps);
 
     // ---------------------- Warm-up (no black_box on slices) ----------------------
-    {
-        let mut acc = 0i64;
-        let s = &vec_i64[..];
-        for &v in s {
-            acc += v;
-        }
-        black_box(acc);
-    }
-    {
-        let mut acc = 0i64;
-        let s = &vec64_i64[..];
-        for &v in s {
-            acc += v;
-        }
-        black_box(acc);
-    }
-    {
-        let mut acc = 0.0f64;
-        let s = &vec_f64[..];
-        for &v in s {
-            acc += v;
-        }
-        black_box(acc);
-    }
-    {
-        let mut acc = 0.0f64;
-        let s = &vec64_f64[..];
-        for &v in s {
-            acc += v;
-        }
-        black_box(acc);
-    }
+    black_box(sum_i64(vec_i64));
+    black_box(sum_i64(&vec64_i64[..]));
+    black_box(sum_f64(vec_f64));
+    black_box(sum_f64(&vec64_f64[..]));
 
     // ---------------------- Timed runs (alternate order) ----------------------
     let mut durs_vec_i64 = Vec::with_capacity(ITERS);
@@ -216,79 +187,23 @@ pub fn main() {
 
     for i in 0..ITERS {
         if i % 2 == 0 {
-            let d1 = time_once(|| {
-                let mut acc = 0i64;
-                let s = &vec_i64[..];
-                for &v in s {
-                    acc += v;
-                }
-                acc
-            });
-            let d2 = time_once(|| {
-                let mut acc = 0i64;
-                let s = &vec64_i64[..];
-                for &v in s {
-                    acc += v;
-                }
-                acc
-            });
+            let d1 = time_once(|| sum_i64(vec_i64));
+            let d2 = time_once(|| sum_i64(&vec64_i64[..]));
             durs_vec_i64.push(d1);
             durs_vec64_i64.push(d2);
 
-            let d3 = time_once(|| {
-                let mut acc = 0.0f64;
-                let s = &vec_f64[..];
-                for &v in s {
-                    acc += v;
-                }
-                acc
-            });
-            let d4 = time_once(|| {
-                let mut acc = 0.0f64;
-                let s = &vec64_f64[..];
-                for &v in s {
-                    acc += v;
-                }
-                acc
-            });
+            let d3 = time_once(|| sum_f64(vec_f64));
+            let d4 = time_once(|| sum_f64(&vec64_f64[..]));
             durs_vec_f64.push(d3);
             durs_vec64_f64.push(d4);
         } else {
-            let d2 = time_once(|| {
-                let mut acc = 0i64;
-                let s = &vec64_i64[..];
-                for &v in s {
-                    acc += v;
-                }
-                acc
-            });
-            let d1 = time_once(|| {
-                let mut acc = 0i64;
-                let s = &vec_i64[..];
-                for &v in s {
-                    acc += v;
-                }
-                acc
-            });
+            let d2 = time_once(|| sum_i64(&vec64_i64[..]));
+            let d1 = time_once(|| sum_i64(vec_i64));
             durs_vec64_i64.push(d2);
             durs_vec_i64.push(d1);
 
-            let d4 = time_once(|| {
-                let mut acc = 0.0f64;
-                let s = &vec64_f64[..];
-                for &v in s {
-                    acc += v;
-                }
-                acc
-            });
-            let d3 = time_once(|| {
-                let mut acc = 0.0f64;
-                let s = &vec_f64[..];
-                for &v in s {
-                    acc += v;
-                }
-                acc
-            });
+            let d4 = time_once(|| sum_f64(&vec64_f64[..]));
+            let d3 = time_once(|| sum_f64(vec_f64));
             durs_vec64_f64.push(d4);
             durs_vec_f64.push(d3);
         }

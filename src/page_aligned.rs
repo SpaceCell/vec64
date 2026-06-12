@@ -41,14 +41,14 @@ impl<T> PageAligned for Vec64<T> {
     }
 
     fn next_page_aligned_len(&self) -> Option<usize> {
-        let step = step_rows::<T>()?;
+        let step = page_align_t_step::<T>()?;
         let len = self.len();
         let rem = len % step;
         Some(if rem == 0 { len } else { len + (step - rem) })
     }
 
     fn prev_page_aligned_len(&self) -> Option<usize> {
-        let step = step_rows::<T>()?;
+        let step = page_align_t_step::<T>()?;
         Some((self.len() / step) * step)
     }
 
@@ -73,16 +73,33 @@ impl<T> PageAligned for Vec64<T> {
     }
 }
 
-/// Row count whose byte size is a multiple of `HUGE_PAGE` for element
-/// type `T`. `None` for ZSTs.
+/// Row-count step for the page-alignment of a `Vec64<T>`. Returns the
+/// smallest non-zero length at which a buffer of element type `T`
+/// becomes page-aligned. `None` for ZSTs or builds where the mmap path
+/// is unavailable.
+pub fn page_align_t_step<T>() -> Option<usize> {
+    step_rows_inner(std::mem::size_of::<T>())
+}
+
+/// Row-count step for a bit-packed mask. Returns the smallest non-zero
+/// bit count at which the underlying `u8` buffer is page-aligned. `None`
+/// for builds where the mmap path is unavailable.
+pub fn page_align_bitmask_step() -> Option<usize> {
+    step_rows_inner(1).map(|n| n * 8)
+}
+
 #[cfg(all(feature = "mmap", target_os = "linux"))]
-fn step_rows<T>() -> Option<usize> {
-    let elem = std::mem::size_of::<T>();
+fn step_rows_inner(elem: usize) -> Option<usize> {
     if elem == 0 {
         return None;
     }
     let g = gcd(elem, crate::mmap_alloc::HUGE_PAGE);
     Some(crate::mmap_alloc::HUGE_PAGE / g)
+}
+
+#[cfg(not(all(feature = "mmap", target_os = "linux")))]
+fn step_rows_inner(_elem: usize) -> Option<usize> {
+    None
 }
 
 #[cfg(all(feature = "mmap", target_os = "linux"))]

@@ -146,10 +146,15 @@ impl<T> Vec64<T> {
     /// `end == start` is a no-op. `end == len` short-circuits to `truncate`.
     ///
     /// On Linux with the `mmap` feature, when the allocation is mmap-backed
-    /// and both `start * size_of::<T>()` and `end * size_of::<T>()` are
-    /// page-aligned, the surviving tail is relocated via `mremap` and any
-    /// freed tail pages are released with `munmap`. Other inputs go
-    /// through `Vec::drain`.
+    /// and the deleted byte span `(end - start) * size_of::<T>()` is a whole
+    /// multiple of the system page size, the surviving tail is relocated by
+    /// remapping pages rather than copying bytes, and the vacated pages are
+    /// returned to the kernel via `madvise(MADV_FREE)`. The position of the
+    /// range carries no constraint: a range starting mid-page is handled by
+    /// patching the boundary page with a copy of less than one page. The
+    /// zero-copy relocation requires Linux 5.7+; older kernels complete
+    /// through an equivalent in-place copy. All other inputs go through
+    /// `Vec::drain`. Capacity is preserved on every path.
     ///
     /// ## Cross-process safety
     ///
@@ -202,14 +207,28 @@ impl<T> Vec64<T> {
     /// mmap fast path for `delete_range`. Returns `true` when the splice
     /// succeeded; `false` to signal the caller should fall back to `drain`.
     ///
+    /// Fires when the allocation is mmap-backed and the deleted byte span is
+    /// a whole multiple of the system page size. The position of the range
+    /// carries no constraint: when `start` sits mid-page, the leading tail
+    /// bytes are first copied into the gap so the relocation below starts
+    /// and ends on page boundaries i.e. the boundary-page patch costs less
+    /// than one page of copying.
+    ///
+    /// The tail relocates in two `mremap` steps: onto a scratch mapping with
+    /// `MREMAP_DONTUNMAP`, which keeps the source range mapped so the
+    /// allocation never contains unmapped holes, then onto its final
+    /// position. Capacity is preserved, matching `drain`, and the vacated
+    /// pages past the new length are handed back to the kernel with
+    /// `madvise(MADV_FREE)`. Kernels without `MREMAP_DONTUNMAP` (pre-5.7)
+    /// complete through an equivalent in-place copy.
+    ///
     /// # Safety
     /// Caller must guarantee `start < end <= self.len()` and `end < self.len()`
     /// i.e. a strict middle/head delete that is not a tail delete and not
     /// empty.
     #[cfg(all(feature = "mmap", target_os = "linux"))]
     unsafe fn try_mremap_splice(&mut self, start: usize, end: usize) -> bool {
-        use std::alloc::Layout;
-        use std::mem::{align_of, size_of};
+        use std::mem::size_of;
         use std::ptr;
 
         // System page size, queried once. mremap operates at this granularity
@@ -231,23 +250,24 @@ impl<T> Vec64<T> {
         let byte_end = end * elem;
         let byte_len = len * elem;
 
-        // Page alignment is required for both endpoints. mremap moves whole pages.
-        if byte_start & (page - 1) != 0 || byte_end & (page - 1) != 0 {
+        // The tail shifts left by the deleted span, and pages relocate only
+        // in whole-page units, so the span must be a page multiple.
+        if (byte_end - byte_start) & (page - 1) != 0 {
             return false;
         }
 
         // The allocation must actually be mmap-backed. The Cargo features here
         // gate the import path, so this lookup only compiles when mmap_alloc
         // is in the module tree.
-        let cap_bytes = cap * elem;
-        if !crate::mmap_alloc::uses_mmap(cap_bytes) {
+        if !crate::mmap_alloc::uses_mmap(cap * elem) {
             return false;
         }
 
-        // After this point we commit to the splice. Failure modes from here
-        // either succeed or fall back via early return with the Vec restored.
+        // After this point the splice is committed. Every failure mode below
+        // completes the delete through an in-place copy, leaving the Vec valid.
 
-        let original_ptr = self.0.as_mut_ptr();
+        let base = self.0.as_mut_ptr() as *mut u8;
+        let new_len = start + (len - end);
 
         // Drop the elements in the deleted middle. set_len lower first so that
         // a panic in T::drop does not leave the tail in scope for double-drop.
@@ -255,17 +275,52 @@ impl<T> Vec64<T> {
         unsafe {
             self.0.set_len(start);
             ptr::drop_in_place(ptr::slice_from_raw_parts_mut(
-                original_ptr.add(start),
+                (base as *mut T).add(start),
                 end - start,
             ));
         }
 
-        let tail_bytes = byte_len - byte_end;
-        // tail_bytes > 0 by the caller's precondition (end < len).
+        // Boundary-page patch: when byte_start sits mid-page, copy the
+        // leading tail bytes into the gap up to the next page boundary so
+        // the relocation below starts and ends page-aligned. The regions
+        // cannot overlap: the patch ends at or before byte_end, where the
+        // tail begins.
+        let seam = byte_start.next_multiple_of(page) - byte_start;
+        let tail_total = byte_len - byte_end;
+        if seam > 0 {
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    base.add(byte_end) as *const u8,
+                    base.add(byte_start),
+                    seam.min(tail_total),
+                );
+            }
+            if tail_total <= seam {
+                // The whole tail fits inside the patch; no pages move.
+                unsafe {
+                    self.0.set_len(new_len);
+                    let used = (new_len * elem).next_multiple_of(page);
+                    let mapped_end = byte_len.next_multiple_of(page);
+                    if mapped_end > used {
+                        libc::madvise(
+                            base.add(used) as *mut libc::c_void,
+                            mapped_end - used,
+                            libc::MADV_FREE,
+                        );
+                    }
+                }
+                return true;
+            }
+        }
+
+        let splice_src = byte_end + seam;
+        let splice_dst = byte_start + seam;
+        let tail_bytes = byte_len - splice_src;
+        // tail_bytes > 0: the patch-absorbed case returned above.
         let tail_mapped = (tail_bytes + page - 1) & !(page - 1);
 
-        let src = unsafe { (original_ptr as *mut u8).add(byte_end) } as *mut libc::c_void;
-        let dst = unsafe { (original_ptr as *mut u8).add(byte_start) } as *mut libc::c_void;
+        let src = unsafe { base.add(splice_src) } as *mut libc::c_void;
+        let dst = unsafe { base.add(splice_dst) } as *mut libc::c_void;
 
         // The kernel rejects mremap MREMAP_FIXED when source and destination
         // overlap, and mremap MREMAP_MAYMOVE alone is a no-op when the size
@@ -287,25 +342,25 @@ impl<T> Vec64<T> {
         if scratch == libc::MAP_FAILED {
             // Scratch reservation failed. Fall back to an in-place memmove.
             unsafe {
-                ptr::copy(
-                    (original_ptr as *mut u8).add(byte_end),
-                    (original_ptr as *mut u8).add(byte_start),
-                    tail_bytes,
-                );
-                self.0.set_len(start + (len - end));
+                ptr::copy(base.add(splice_src), base.add(splice_dst), tail_bytes);
+                self.0.set_len(new_len);
             }
             return true;
         }
 
         // Step 2: relocate the tail pages into the scratch region. src lives
         // inside the original allocation; scratch is in a freshly mapped slot,
-        // so they cannot overlap and MREMAP_FIXED is safe.
+        // so they cannot overlap and MREMAP_FIXED is safe. MREMAP_DONTUNMAP
+        // keeps the source range mapped as zero-fill pages, so the move in
+        // step 3 only ever replaces pages this allocation owns. Kernels
+        // without MREMAP_DONTUNMAP report EINVAL and the copy path completes
+        // instead.
         let moved = unsafe {
             libc::mremap(
                 src,
                 tail_mapped,
                 tail_mapped,
-                libc::MREMAP_MAYMOVE | libc::MREMAP_FIXED,
+                libc::MREMAP_MAYMOVE | libc::MREMAP_FIXED | libc::MREMAP_DONTUNMAP,
                 scratch,
             )
         };
@@ -313,12 +368,8 @@ impl<T> Vec64<T> {
             // Roll back via in-place memmove and release the scratch reservation.
             unsafe {
                 libc::munmap(scratch, tail_mapped);
-                ptr::copy(
-                    (original_ptr as *mut u8).add(byte_end),
-                    (original_ptr as *mut u8).add(byte_start),
-                    tail_bytes,
-                );
-                self.0.set_len(start + (len - end));
+                ptr::copy(base.add(splice_src), base.add(splice_dst), tail_bytes);
+                self.0.set_len(new_len);
             }
             return true;
         }
@@ -335,13 +386,9 @@ impl<T> Vec64<T> {
 
         if overlaps {
             unsafe {
-                ptr::copy_nonoverlapping(
-                    scratch as *const u8,
-                    dst as *mut u8,
-                    tail_bytes,
-                );
+                ptr::copy_nonoverlapping(scratch as *const u8, dst as *mut u8, tail_bytes);
                 libc::munmap(scratch, tail_mapped);
-                self.0.set_len(start + (len - end));
+                self.0.set_len(new_len);
             }
             return true;
         }
@@ -357,52 +404,29 @@ impl<T> Vec64<T> {
         };
         if placed == libc::MAP_FAILED {
             unsafe {
-                ptr::copy_nonoverlapping(
-                    scratch as *const u8,
-                    dst as *mut u8,
-                    tail_bytes,
-                );
+                ptr::copy_nonoverlapping(scratch as *const u8, dst as *mut u8, tail_bytes);
                 libc::munmap(scratch, tail_mapped);
-                self.0.set_len(start + (len - end));
+                self.0.set_len(new_len);
             }
             return true;
         }
 
-        // The mapping now consists of:
-        //   [base .. base + byte_start)                       survivor head
-        //   [base + byte_start .. base + byte_start + tail_mapped)  relocated tail
-        //
-        // Any region beyond byte_start + tail_mapped within the original
-        // allocation is now either unmapped (scratch source range, original
-        // tail source range) or stale (gap pages between byte_start + tail_mapped
-        // and byte_end, if the original gap was larger than the tail mapping).
-        // Release the trailing remainder so the Vec's reported capacity
-        // matches what is actually mapped.
-        let new_mapped = byte_start + tail_mapped;
-        let old_mapped = crate::mmap_alloc::mapped_size(cap_bytes);
-        if old_mapped > new_mapped {
-            unsafe {
-                libc::munmap(
-                    (original_ptr as *mut u8).add(new_mapped) as *mut libc::c_void,
-                    old_mapped - new_mapped,
+        // The allocation's extent and capacity are unchanged; only contents
+        // moved. Hand the pages past the new length back to the kernel: the
+        // addresses stay mapped and writable, and the kernel reclaims the
+        // physical frames under memory pressure.
+        unsafe {
+            self.0.set_len(new_len);
+            let used = (new_len * elem).next_multiple_of(page);
+            let mapped_end = byte_len.next_multiple_of(page);
+            if mapped_end > used {
+                libc::madvise(
+                    base.add(used) as *mut libc::c_void,
+                    mapped_end - used,
+                    libc::MADV_FREE,
                 );
             }
         }
-
-        // Reconstruct the Vec with the new capacity. into_raw_parts_with_alloc
-        // gives back the allocator instance so we keep the original allocator.
-        // Element alignment is unchanged because the base pointer is unchanged.
-        let new_len = start + tail_bytes / elem;
-        let new_cap = new_mapped / elem;
-        debug_assert!(new_cap >= new_len);
-        debug_assert_eq!(original_ptr as usize % align_of::<T>(), 0);
-        // Sanity-check the layout the allocator will see at dealloc time.
-        let _ = Layout::array::<T>(new_cap).expect("delete_range: layout overflow");
-
-        let stub = Vec::new_in(Vec64Alloc::default());
-        let old = std::mem::replace(&mut self.0, stub);
-        let (_old_ptr, _old_len, _old_cap, alloc) = old.into_raw_parts_with_alloc();
-        self.0 = unsafe { Vec::from_raw_parts_in(original_ptr, new_len, new_cap, alloc) };
 
         true
     }
@@ -1176,12 +1200,11 @@ mod tests {
         let base_after = v.as_ptr() as usize;
         assert_eq!(base_before, base_after,
             "head pages should not relocate when the splice fast path fires");
-        // The splice path shrinks capacity to reflect the released tail pages;
-        // drain would preserve capacity. This assertion catches a silent
-        // regression that lets the fast path fall through unnoticed.
-        assert!(v.capacity() < cap_before,
-            "capacity did not shrink: cap_before {cap_before}, cap_after {} \
-             - splice fast path did not fire", v.capacity());
+        // Capacity is preserved on the splice path, matching drain; the
+        // vacated physical pages return to the kernel via madvise.
+        assert_eq!(v.capacity(), cap_before,
+            "capacity changed: cap_before {cap_before}, cap_after {}",
+            v.capacity());
         assert_eq!(v.len(), n - elems_per_page);
         for i in 0..start {
             assert_eq!(v[i], i as u64, "head bytes corrupted at {i}");
@@ -1195,8 +1218,9 @@ mod tests {
 
     #[cfg(all(feature = "mmap", target_os = "linux"))]
     #[test]
-    fn test_delete_range_mmap_unaligned_falls_back() {
-        // Non-page-aligned delete still has to work, via the drain fallback.
+    fn test_delete_range_mmap_span_not_page_multiple_falls_back() {
+        // A deleted span that is not a page multiple still has to work,
+        // via the drain fallback.
         let n: usize = 512 * 1024;
         let mut v: Vec64<u64> = (0..n as u64).collect();
         v.delete_range(7, 19);
@@ -1204,6 +1228,113 @@ mod tests {
         assert_eq!(v[0], 0);
         assert_eq!(v[6], 6);
         assert_eq!(v[7], 19);
+    }
+
+    #[cfg(all(feature = "mmap", target_os = "linux"))]
+    #[test]
+    fn test_delete_range_mmap_page_multiple_span_unaligned_start() {
+        // The splice condition is on the deleted span, not the endpoints:
+        // a page-multiple span starting mid-page takes the fast path with a
+        // boundary-page patch.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let elems_per_page = page / 8;
+        let n: usize = 512 * 1024;
+        let mut v: Vec64<u64> = (0..n as u64).collect();
+        let base_before = v.as_ptr() as usize;
+        let cap_before = v.capacity();
+
+        // Mid-page start, span of three whole pages.
+        let start = elems_per_page + 3;
+        let end = start + elems_per_page * 3;
+        assert!(unsafe { v.try_mremap_splice(start, end) },
+            "page-multiple span at a mid-page position should splice");
+
+        assert_eq!(v.as_ptr() as usize, base_before,
+            "head pages should not relocate");
+        assert_eq!(v.capacity(), cap_before, "capacity should be preserved");
+        assert_eq!(v.len(), n - elems_per_page * 3);
+        for i in 0..start {
+            assert_eq!(v[i], i as u64, "head bytes corrupted at {i}");
+        }
+        for i in start..v.len() {
+            assert_eq!(v[i], (i + elems_per_page * 3) as u64,
+                "tail bytes corrupted at {i}");
+        }
+        assert_eq!(v.as_ptr() as usize % 64, 0);
+    }
+
+    #[cfg(all(feature = "mmap", target_os = "linux"))]
+    #[test]
+    fn test_try_mremap_splice_rejects_span_not_page_multiple() {
+        let n: usize = 512 * 1024;
+        let mut v: Vec64<u64> = (0..n as u64).collect();
+        // Page-aligned start, span one element short of a page.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let elems_per_page = page / 8;
+        let start = elems_per_page;
+        let end = start + elems_per_page - 1;
+        assert!(!unsafe { v.try_mremap_splice(start, end) });
+        // A rejected splice leaves the Vec untouched.
+        assert_eq!(v.len(), n);
+        assert_eq!(v[start], start as u64);
+    }
+
+    #[cfg(all(feature = "mmap", target_os = "linux"))]
+    #[test]
+    fn test_try_mremap_splice_rejects_heap_backed() {
+        let mut v: Vec64<u64> = (0..64u64).collect();
+        assert!(!unsafe { v.try_mremap_splice(8, 16) });
+        assert_eq!(v.len(), 64);
+    }
+
+    #[cfg(all(feature = "mmap", target_os = "linux"))]
+    #[test]
+    fn test_delete_range_mmap_tail_absorbed_by_patch() {
+        // A page-multiple span ending just short of the tail: the surviving
+        // tail is smaller than the boundary-page patch and is absorbed by it.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let elems_per_page = page / 8;
+        let n: usize = 512 * 1024;
+        let mut v: Vec64<u64> = (0..n as u64).collect();
+        let base_before = v.as_ptr() as usize;
+
+        let end = n - 2;
+        let start = end - elems_per_page;
+        assert!(unsafe { v.try_mremap_splice(start, end) },
+            "patch-absorbed splice should fire");
+
+        assert_eq!(v.as_ptr() as usize, base_before);
+        assert_eq!(v.len(), n - elems_per_page);
+        assert_eq!(v[start - 1], (start - 1) as u64);
+        assert_eq!(v[start], end as u64);
+        assert_eq!(v[start + 1], (end + 1) as u64);
+    }
+
+    #[cfg(all(feature = "mmap", target_os = "linux"))]
+    #[test]
+    fn test_delete_range_mmap_then_grow() {
+        // Growth after a splice exercises the allocator with the preserved
+        // capacity: the mapping extent still matches what deallocate and
+        // grow expect.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let elems_per_page = page / 8;
+        let n: usize = 512 * 1024;
+        let mut v: Vec64<u64> = (0..n as u64).collect();
+        let cap_before = v.capacity();
+
+        v.delete_range(elems_per_page, elems_per_page * 2);
+        assert_eq!(v.len(), n - elems_per_page);
+
+        // Extend past the original capacity to force an allocator grow.
+        let target = cap_before + elems_per_page;
+        while v.len() < target {
+            v.push(7);
+        }
+        assert_eq!(v.len(), target);
+        assert_eq!(v[0], 0);
+        assert_eq!(v[elems_per_page], (elems_per_page * 2) as u64);
+        assert_eq!(v[target - 1], 7);
+        assert_eq!(v.as_ptr() as usize % 64, 0);
     }
 
     #[test]
