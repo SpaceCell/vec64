@@ -692,6 +692,37 @@ mod tests {
         unsafe { a.deallocate(grown.as_non_null_ptr(), big) };
     }
 
+    /// Classification stability at the heap/mmap boundary: the size a
+    /// caller later derives from the returned block must select the same
+    /// path the allocation took, and must recompute the same mapped
+    /// extent.
+    #[test]
+    fn test_boundary_classification_stable() {
+        let a = MAllocPg64;
+        for size in [
+            HUGE_PAGE - 64,
+            HUGE_PAGE - 8,
+            HUGE_PAGE - 1,
+            HUGE_PAGE,
+            HUGE_PAGE + 1,
+        ] {
+            let layout = Layout::from_size_align(size, 1).unwrap();
+            let ptr = a.allocate(layout).expect("allocate failed");
+            let returned = ptr.len();
+            assert_eq!(
+                uses_mmap(size),
+                uses_mmap(returned),
+                "classification flipped: requested {size}, returned {returned}"
+            );
+            if uses_mmap(returned) {
+                assert_eq!(mapped_size(returned), returned, "mapped_size not idempotent");
+            } else {
+                assert_eq!(returned, size, "heap path changed the size");
+            }
+            unsafe { a.deallocate(ptr.as_non_null_ptr(), layout) };
+        }
+    }
+
     #[test]
     fn test_mapped_size_rounding() {
         assert_eq!(mapped_size(0), HUGE_PAGE);

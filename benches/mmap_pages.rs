@@ -105,8 +105,9 @@ fn bench_mremap_growth(c: &mut Criterion) {
     group.finish();
 }
 
-/// Verify mmap allocations are 64-byte aligned and return
-/// the full mapped size. This is a correctness check that
+/// Verify allocations are 64-byte aligned and return at least the
+/// requested size; allocations at or above `HUGE_PAGE` return the full
+/// huge-page-rounded mapping. This is a correctness check that
 /// runs as a benchmark to confirm no regression under load.
 fn bench_alignment_check(c: &mut Criterion) {
     let mut group = c.benchmark_group("alignment_check");
@@ -123,7 +124,11 @@ fn bench_alignment_check(c: &mut Criterion) {
                     let ptr = a.allocate(*layout).expect("allocate failed");
                     let addr = ptr.cast::<u8>().as_ptr() as usize;
                     assert_eq!(addr % 64, 0, "not 64-byte aligned");
-                    assert!(ptr.len() >= HUGE_PAGE, "returned size below huge page");
+                    if layout.size() >= HUGE_PAGE {
+                        assert!(ptr.len() >= HUGE_PAGE, "mapped size below huge page");
+                    } else {
+                        assert!(ptr.len() >= layout.size(), "returned size below request");
+                    }
                     black_box(addr);
                     unsafe { a.deallocate(ptr.cast::<u8>(), *layout) };
                 });
