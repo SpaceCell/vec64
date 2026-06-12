@@ -33,3 +33,6 @@ All standard `Vec` operations work as expected.
 ## License
 
 Apache-2.0
+
+## HPC
+For an edge in high-performance data computing, visit [spacecell.com](http://spacecell.com).
