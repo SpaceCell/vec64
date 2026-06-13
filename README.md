@@ -34,5 +34,8 @@ All standard `Vec` operations work as expected.
 
 Apache-2.0
 
-## HPC
+## Backed by SpaceCell
+
+Vec64 is backed by SpaceCell, ensuring ongoing support for the project.
+
 For an edge in high-performance data computing, visit [spacecell.com](http://spacecell.com).
