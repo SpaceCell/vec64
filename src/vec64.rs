@@ -6,6 +6,7 @@
 //! of the allocation is 64-byte aligned for SIMD, cache line, and
 //! low-level hardware optimisations.
 
+use std::alloc::{Allocator, Layout, handle_alloc_error};
 use std::borrow::{Borrow, BorrowMut};
 use std::fmt::{Debug, Display, Formatter, Result};
 use std::mem;
@@ -63,6 +64,43 @@ impl<T> Vec64<T> {
     #[inline]
     pub fn with_capacity(cap: usize) -> Self {
         Self(Vec::with_capacity_in(cap, Vec64Alloc::default()))
+    }
+
+    /// Allocates `len` zero-initialised elements without an explicit fill pass.
+    ///
+    /// ## Behaviour
+    ///
+    /// - Uses the allocator's zeroed path, allowing the operating system to provide
+    ///   memory that is already zeroed.
+    /// - Avoids a separate pass over buffers overwritten before their first read
+    ///   or never read.
+    ///
+    /// # Safety
+    ///
+    /// All-zero bits must represent a valid value of `T`.
+    ///
+    /// Valid types include integers, floating-point values, booleans, and plain
+    /// structs containing only those types. Invalid types include references,
+    /// `NonNull`, and enums without a zero discriminant.
+    #[inline]
+    pub unsafe fn zeroed(len: usize) -> Self {
+        if len == 0 || mem::size_of::<T>() == 0 {
+            let mut v = Self::with_capacity(len);
+            // SAFETY: a zero-sized element needs no storage, so every index
+            // below `len` is valid, and a zero-length request sets no length.
+            unsafe { v.0.set_len(len) };
+            return v;
+        }
+        let layout = Layout::array::<T>(len)
+            .expect("Vec64::zeroed: the element count overflows the address space");
+        let alloc = Vec64Alloc::default();
+        let block = alloc
+            .allocate_zeroed(layout)
+            .unwrap_or_else(|_| handle_alloc_error(layout));
+        // SAFETY: `block` came from `alloc` under the layout `Vec` expects for
+        // a capacity of `len` elements, and the caller guarantees that zero
+        // bits are a valid `T`.
+        Self(unsafe { Vec::from_raw_parts_in(block.cast::<T>().as_ptr(), len, len, alloc) })
     }
 
     /// Useful when interpreting raw bytes that are buffered
@@ -860,6 +898,18 @@ macro_rules! vec64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zeroed_reads_as_zeros_at_full_length() {
+        let v: Vec64<f64> = unsafe { Vec64::zeroed(10_000) };
+        assert_eq!(v.len(), 10_000);
+        assert_eq!(v.capacity(), 10_000);
+        assert!(v.iter().all(|&x| x == 0.0));
+        assert_eq!(v.as_ptr() as usize % 64, 0);
+        let empty: Vec64<u32> = unsafe { Vec64::zeroed(0) };
+        assert!(empty.is_empty());
+    }
+
     #[cfg(feature = "parallel_proc")]
     #[test]
     fn test_new_and_default() {
