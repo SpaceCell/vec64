@@ -1,5 +1,3 @@
-#![feature(allocator_api)]
-
 //! Criterion benchmarks for mmap page-level behaviour: allocation
 //! latency, sequential scan throughput, and huge page verification.
 //!

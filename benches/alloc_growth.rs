@@ -1,5 +1,3 @@
-#![feature(allocator_api)]
-
 //! Criterion benchmarks comparing heap-based Alloc64 (realloc)
 //! against MAllocPg64 (mremap) for buffer growth operations.
 //!

@@ -3,7 +3,6 @@
 
 #[cfg(feature = "global")]
 mod global_allocator {
-    #![feature(allocator_api)]
     use vec64::Alloc64Global;
 
     #[global_allocator]

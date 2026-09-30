@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.3] - 2026-10-01
+
+Nightly compatibility release.
+
+The 2026-09-30 Rust nightly stabilises the core of `allocator_api` and moves
+the remaining unstable allocator surface, including `Vec::drain` on custom
+allocators, to the new `allocator_ext` feature. The crate now enables
+`allocator_ext` in place of `allocator_api` and requires the 2026-09-30
+nightly or later. There is no public API change.
+
+## [0.5.2] - 2026-09-16
+
+Added `Vec64::zeroed`, an unsafe constructor that allocates zero-initialised
+elements through the allocator's zeroed path, avoiding a separate fill pass.
+
 ## [0.5.1] - 2026-08-28
 
 Nightly compatibility release.

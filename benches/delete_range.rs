@@ -1,3 +1,5 @@
+#![feature(allocator_ext)]
+
 //! Benchmark: middle-range delete on a large mmap-backed Vec64<u64>.
 //!
 //! Three paths compared:

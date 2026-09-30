@@ -1,5 +1,3 @@
-#![feature(allocator_api)]
-
 //! Criterion benchmarks comparing jemalloc against Alloc64 and MAllocPg64.
 //!
 //! jemalloc is set as the global allocator, so:
