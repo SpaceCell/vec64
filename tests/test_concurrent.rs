@@ -1,5 +1,3 @@
-#![cfg_attr(feature = "mmap", feature(allocator_api))]
-
 //! Concurrent and multi-threaded tests for Vec64 and its allocators.
 //!
 //! Simulates Arrow buffer-style workloads: parallel column construction,

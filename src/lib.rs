@@ -44,7 +44,7 @@
 //! needs SharedArrayBuffer support (cross-origin isolation via COOP/COEP headers).
 //! See `wasm-test/` for a complete working example.
 
-#![feature(allocator_api)]
+#![feature(allocator_ext)]
 #![feature(slice_ptr_get)]
 
 pub mod alloc64;
