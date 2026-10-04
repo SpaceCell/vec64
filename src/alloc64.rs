@@ -9,7 +9,7 @@
 //! with SIMD processing (e.g. Intel AVX-512).
 //!
 //! See: <https://arrow.apache.org/docs/format/Columnar.html>
-use core::alloc::{AllocError, Allocator, Layout};
+use core::alloc::{AllocError, Allocator, AllocatorNightly, Layout};
 use core::ptr::NonNull;
 use std::alloc::dealloc;
 use std::ptr::slice_from_raw_parts_mut;
@@ -73,6 +73,9 @@ fn hint_hugepage(ptr: *mut u8, size: usize) {
 #[cfg(not(all(feature = "thp", target_os = "linux")))]
 #[inline]
 fn hint_hugepage(_ptr: *mut u8, _size: usize) {}
+
+// Required by `Vec` methods such as `drain` for non-global allocators.
+impl AllocatorNightly for Alloc64 {}
 
 unsafe impl Allocator for Alloc64 {
     /// Allocates memory with at least 64-byte alignment.

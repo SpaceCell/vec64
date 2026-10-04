@@ -46,7 +46,7 @@
 //! visible to the other, and in-place page remapping on the owning side
 //! invalidates the remote view. Treat such buffers as immutable after
 //! sharing, or coordinate the lifecycle externally.
-use core::alloc::{AllocError, Allocator, Layout};
+use core::alloc::{AllocError, Allocator, AllocatorNightly, Layout};
 use core::ptr::NonNull;
 use std::ptr::slice_from_raw_parts_mut;
 
@@ -208,6 +208,9 @@ unsafe fn heap_shrink(
         .map(|nn| unsafe { fat_ptr(nn, new_layout.size()) })
         .ok_or(AllocError)
 }
+
+// Required by `Vec` methods such as `drain` for non-global allocators.
+impl AllocatorNightly for MAllocPg64 {}
 
 unsafe impl Allocator for MAllocPg64 {
     #[inline]
